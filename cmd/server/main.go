@@ -13,6 +13,7 @@ import (
 
 	"github.com/papadacodr/kryptic-gopha/internal/engine"
 	"github.com/papadacodr/kryptic-gopha/internal/ingester"
+	"github.com/papadacodr/kryptic-gopha/pkg/notifier"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
@@ -52,6 +53,16 @@ func main() {
 	trader.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.01")
 	trader.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.05")
 	trader.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
+
+	// 2b. Telegram Notifications
+	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	tgChatID := os.Getenv("TELEGRAM_CHAT_ID")
+	if tgToken != "" && tgChatID != "" {
+		trader.Notifier = notifier.NewTelegramNotifier(tgToken, tgChatID)
+		log.Info().Msg("Telegram notifications enabled")
+	} else {
+		log.Warn().Msg("Telegram not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable.")
+	}
 
 	// 3. Load previous state if exists
 	if _, err := os.Stat(stateFile); err == nil {
