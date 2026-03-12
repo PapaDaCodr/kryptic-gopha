@@ -130,7 +130,7 @@ func TestStrategy_IncrementalAccuracy(t *testing.T) {
 }
 
 func TestPaperTrader_TimeExit(t *testing.T) {
-	trader := NewPaperTrader()
+	trader := NewPaperTrader(10000.0)
 	trader.TP = decimal.NewFromFloat(0.5) // High TP so it doesn't hit
 	trader.SL = decimal.NewFromFloat(0.5) // High SL so it doesn't hit
 	symbol := "BTC"
@@ -164,7 +164,7 @@ func TestPaperTrader_TimeExit(t *testing.T) {
 
 func TestEngineManager_UpdatePrice(t *testing.T) {
 	strategy := NewEfficientStrategy(2, 4, 2)
-	trader := NewPaperTrader()
+	trader := NewPaperTrader(10000.0)
 	symbols := []string{"BTCUSDT"}
 	mgr := NewEngineManager(symbols, 10, strategy, trader)
 
@@ -184,7 +184,7 @@ func TestEngineManager_UpdatePrice(t *testing.T) {
 }
 
 func TestPaperTrader_StatusTransitions(t *testing.T) {
-	trader := NewPaperTrader()
+	trader := NewPaperTrader(10000.0)
 	trader.TP = decimal.NewFromFloat(0.01) // 1%
 	trader.SL = decimal.NewFromFloat(0.01) // 1%
 	symbol := "ETHUSDT"

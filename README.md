@@ -7,32 +7,29 @@ Kryptic Gopha is a high-performance, concurrent trading system developed in Go. 
 The engine is built on a modular architecture designed for horizontal scalability and low-latency processing:
 
 ### 1. Data Ingestion Layer
-Utilizes high-speed WebSocket connections to Binance for real-time trade data. The layer includes robust reconnection logic and connection monitoring to ensure zero data loss during high-volatility events.
+Utilizes high-speed WebSocket connections to Binance for real-time trade data. Built with `context.Context` for robust lifecycle management, preventing goroutine leaks and ensuring clean reconnections.
 
 ### 2. Processing Engine (EngineManager)
-The core of the system uses a sharded state management approach. Each market pair is isolated with its own mutex and state, allowing the engine to process thousands of ticks per second across multiple symbols without lock contention.
+The core of the system uses a sharded state management approach. Each market pair is isolated with its own mutex and state. 
+- **Precision**: Uses `shopspring/decimal` for 100% financial calculation accuracy.
+- **Concurrency**: Implements non-blocking signal broadcasting to ensure no symbol stalls the entire engine.
 
 ### 3. Strategy Implementation
-The system implements a recursive Multi-Factor Strategy. By utilizing incremental calculation logic for EMA (Exponential Moving Average) and RSI (Relative Strength Index), the computational complexity of signal generation is reduced from O(N) to O(1) per update.
+The system implements a recursive Multi-Factor Strategy. 
+- **Warm-up**: Automatically fetches historical data on startup to seed indicators.
+- **Complexity**: Reducing computational complexity from O(N) to O(1) via incremental EMA/RSI calculations.
 
 ### 4. Paper Trading & Risk Management
-The integrated PaperTrader simulates live execution. It incorporates:
-- Real-time Stop-Loss (SL) monitoring.
-- Real-time Take-Profit (TP) monitoring.
-- Event-based time tracking for accurate historical simulation.
+The institutional-grade PaperTrader simulates live execution with:
+- **Dynamic Position Sizing**: Automatically calculates order quantity based on 1% balance risk.
+- **Circuit Breaker**: Auto-suspends trading if the daily loss limit (default 5%) is triggered.
+- **State Persistence**: Saves all trades and metrics to `trader_state.json` to survive restarts.
 
-## Technical Specifications
-
-- Language: Go 1.22
-- Concurrency Model: CSP (Communicating Sequential Processes) via Channels
-- Memory Management: Zero-allocation-focused price buffering
-- Deployment: Dockerized multi-stage builds
+### 5. Observability
+- **Structured Logging**: All logs are JSON-formatted via `zerolog` for enterprise monitoring.
+- **JSON API**: Health and performance metrics exposed via `/health` endpoint.
 
 ## Getting Started
-
-### Prerequisites
-- Go 1.22 or higher
-- Docker (optional, for containerized deployment)
 
 ### Installation
 1. Clone the repository:
@@ -41,63 +38,27 @@ The integrated PaperTrader simulates live execution. It incorporates:
    cd kryptic-gopha
    ```
 
-2. Initialize environment variables:
+2. Initialize environment variables in `.env`.
+
+3. Run the Backtester or Live Bot:
    ```bash
-   cp .env.example .env
+   # Backtest
+   go run cmd/backtester/main.go --symbol ETHUSDT --limit 1000
+   
+   # Live Bot (Paper Mode)
+   go run cmd/server/main.go
    ```
-
-3. Download dependencies:
-   ```bash
-   go mod download
-   ```
-
-### Running the Live Bot
-To run the real-time trading engine:
-```bash
-go build -o bot ./cmd/server/main.go
-./bot
-```
-
-### Running the Backtester
-The backtester pulls historical data directly from the Binance REST API to simulate past performance:
-```bash
-go run cmd/backtester/main.go --symbol BTCUSDT --limit 1000 --interval 1m
-```
-
-### Testing
-The project includes a comprehensive test suite for verifying engine integrity and risk logic:
-```bash
-go test -v ./...
-```
 
 ## Configuration
 
-The system is configured via environment variables. Key parameters include:
-
 | Variable | Description |
 | :--- | :--- |
-| WATCHLIST | Comma-separated list of symbols (e.g., BTCUSDT,ETHUSDT) |
-| TP | Take-Profit threshold in decimal (0.01 = 1%) |
-| SL | Stop-Loss threshold in decimal (0.005 = 0.5%) |
-| SHORT_PERIOD | EMA short-term period |
-| LONG_PERIOD | EMA long-term period |
-| RSI_PERIOD | RSI calculation period |
-
-## Deployment
-
-The system is fully containerized. To build and run via Docker:
-```bash
-docker build -t kryptic-gopha .
-docker run --env-file .env kryptic-gopha
-```
-
-## CI/CD Pipeline
-
-The project utilizes GitHub Actions for continuous integration. Every push to the main branch triggers:
-1. Workspace linting and code integrity checks.
-2. Automated builds for the bot and backtester binaries.
-3. Execution of the full unit and integration test suite.
+| WATCHLIST | Comma-separated symbols (e.g., BTCUSDT,ETHUSDT) |
+| TP / SL | Take-Profit (0.005) and Stop-Loss (0.003) |
+| INITIAL_BALANCE | Wallet starting amount (e.g., 10000.0) |
+| RISK_PER_TRADE | % balance to risk per signal (0.01 = 1%) |
+| DAILY_LOSS_LIMIT| Drawdown limit before circuit breaker (0.05 = 5%) |
 
 ## Disclaimer
 
-This software is provided for educational and research purposes. Digital asset trading involves significant risk. The developers are not responsible for financial losses incurred through the use of this software.
+This software is provided for educational purposes. Digital asset trading involves significant risk. The developers are not responsible for financial losses.
