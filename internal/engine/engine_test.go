@@ -131,6 +131,7 @@ func TestStrategy_IncrementalAccuracy(t *testing.T) {
 
 func TestPaperTrader_TimeExit(t *testing.T) {
 	trader := NewPaperTrader(10000.0)
+	trader.TrailingSL = false // Disable trailing for this test
 	trader.TP = decimal.NewFromFloat(0.5) // High TP so it doesn't hit
 	trader.SL = decimal.NewFromFloat(0.5) // High SL so it doesn't hit
 	symbol := "BTC"
@@ -185,6 +186,7 @@ func TestEngineManager_UpdatePrice(t *testing.T) {
 
 func TestPaperTrader_StatusTransitions(t *testing.T) {
 	trader := NewPaperTrader(10000.0)
+	trader.TrailingSL = false // Disable trailing for this test
 	trader.TP = decimal.NewFromFloat(0.01) // 1%
 	trader.SL = decimal.NewFromFloat(0.01) // 1%
 	symbol := "ETHUSDT"
@@ -212,5 +214,43 @@ func TestPaperTrader_StatusTransitions(t *testing.T) {
 	trader.UpdateMetrics(symbol, decimal.NewFromInt(1020), now.Add(11 * time.Minute))
 	if trader.TotalLosses != 1 {
 		t.Errorf("Expected 1 loss, got %d", trader.TotalLosses)
+	}
+}
+
+func TestPaperTrader_TrailingSL(t *testing.T) {
+	trader := NewPaperTrader(10000.0)
+	trader.TP = decimal.NewFromFloat(0.10)  // 10% TP (won't hit in this test)
+	trader.TrailingSL = true
+	trader.TrailingSLPct = decimal.NewFromFloat(0.01) // 1% trailing distance
+	symbol := "BTC"
+	now := time.Now()
+
+	// Open a BUY at 1000
+	trader.OnSignal(models.Signal{
+		Symbol:    symbol,
+		Price:     decimal.NewFromInt(1000),
+		Direction: "BUY",
+		Timestamp: now,
+	})
+
+	// Price rises to 1050 (HWM updates to 1050)
+	trader.UpdateMetrics(symbol, decimal.NewFromInt(1050), now.Add(time.Minute))
+	if len(trader.ActiveTrades[symbol]) != 1 {
+		t.Fatal("Trade should still be active at 1050")
+	}
+
+	// Price drops to 1040 (1% trailing from 1050 = 1039.5, so 1040 is above -> still active)
+	trader.UpdateMetrics(symbol, decimal.NewFromInt(1040), now.Add(2*time.Minute))
+	if len(trader.ActiveTrades[symbol]) != 1 {
+		t.Fatal("Trade should still be active at 1040 (trail stop is 1039.5)")
+	}
+
+	// Price drops to 1039 (below 1039.5 trailing stop) -> should close as WIN (1039 > 1000 entry)
+	trader.UpdateMetrics(symbol, decimal.NewFromInt(1039), now.Add(3*time.Minute))
+	if len(trader.ActiveTrades[symbol]) != 0 {
+		t.Fatal("Trade should have been closed by trailing SL at 1039")
+	}
+	if trader.TotalWins != 1 {
+		t.Errorf("Expected 1 win (trailing SL above entry), got wins=%d losses=%d", trader.TotalWins, trader.TotalLosses)
 	}
 }
