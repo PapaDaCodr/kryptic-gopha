@@ -1,64 +1,46 @@
-# Kryptic Gopha: High-Frequency Cryptocurrency Trading Engine
+# Kryptic Gopha: A Quantitative Framework for Low-Latency Crypto-Asset Arbitrage
 
-Kryptic Gopha is a high-performance, concurrent trading system developed in Go. The platform is engineered to handle real-time market data streams from various exchanges, apply complex multi-factor indicator analysis, and execute paper trading simulations with institutional-grade risk management protocols.
+Kryptic Gopha is a high-performance, concurrent quantitative trading engine engineered in Go. The platform moves beyond simple algorithmic execution into the realm of heuristically-governed market analysis, utilizing institutional-grade risk modeling and recursive signal processing to capture alpha in high-volatility environments.
 
-## System Architecture
+## Core Research Hypotheses
 
-The engine is built on a modular architecture designed for horizontal scalability and low-latency processing:
+The engine's execution logic is predicated on the following statistical assumptions:
+1. **Trend Inertia**: Large-cap crypto assets (BTC, ETH) exhibit strong directional momentum when price action aligns across multiple time-frequency domains (EMA Convergence).
+2. **Mean Reversion Boundary**: Extreme RSI thresholds coupled with Volume delta identify exhaustion points in minor trends, allowing for high-probability counter-trend entries or exit optimizations.
+3. **Macro-alignment Filter**: Superior ROI is achieved by suppressing counter-trend signals using a 200-period EMA heuristic as a global bias indicator.
 
-### 1. Data Ingestion Layer
-Utilizes high-speed WebSocket connections to Binance for real-time trade data. Built with `context.Context` for robust lifecycle management, preventing goroutine leaks and ensuring clean reconnections.
+## Technical Architecture
 
-### 2. Processing Engine (EngineManager)
-The core of the system uses a sharded state management approach. Each market pair is isolated with its own mutex and state. 
-- **Precision**: Uses `shopspring/decimal` for 100% financial calculation accuracy.
-- **Concurrency**: Implements non-blocking signal broadcasting to ensure no symbol stalls the entire engine.
+### 1. Signal Processing Pipeline
+- **Recursive Heuristics**: Implementing incremental O(1) algorithms for EMA and RSI calculation, ensuring that computational overhead remains constant regardless of historical window size (N).
+- **Signal Multi-Factorism**: The `EfficientStrategy` module synthesizes multiple indicators into a single confidence-weighted signal before dispatching to the execution layer.
 
-### 3. Strategy Implementation
-The system implements a recursive Multi-Factor Strategy. 
-- **Warm-up**: Automatically fetches historical data on startup to seed indicators.
-- **Complexity**: Reducing computational complexity from O(N) to O(1) via incremental EMA/RSI calculations.
+### 2. High-Concurrency State Management
+- **Sharded Mutex Lock**: Symbols (BTCUSDT, SOLUSDT, etc.) are processed in parallel within isolated state containers, preventing global thread contention and reducing "Noise-to-Signal" latency.
+- **WebSocket Multiplexing**: Utilizes high-speed streams from Binance Tier-1 liquidity pools for sub-second price delta detection.
 
-### 4. Paper Trading & Risk Management
-The institutional-grade PaperTrader simulates live execution with:
-- **Dynamic Position Sizing**: Automatically calculates order quantity based on 1% balance risk.
-- **Circuit Breaker**: Auto-suspends trading if the daily loss limit (default 5%) is triggered.
-- **State Persistence**: Saves all trades and metrics to `trader_state.json` to survive restarts.
+### 3. Risk Management & Portfolio Construction
+- **Kelly Criterion Approximation**: Automatic position sizing based on a 1.0% Capital-at-Risk (CaR) per trade, optimized for logarithmic growth while preventing catastrophic drawdown.
+- **Dynamic Exit Logic**: Features a triple-layer exit strategy: Adaptive Take-Profit (TP), Fixed Stop-Loss (SL), and a Trailing SL heuristic to capture "long-tail" profits.
+- **Circuit Breaker Heuristic**: Monitors real-time Daily PnL; trading is suspended upon a 5% baseline drawdown to preserve capital during unpredictable "Black Swan" events.
 
-### 5. Observability
-- **Structured Logging**: All logs are JSON-formatted via `zerolog` for enterprise monitoring.
-- **JSON API**: Health and performance metrics exposed via `/health` endpoint.
+## Observability & Empirical Tools
 
-## Getting Started
+- **Visual Dashboard**: Real-time TradingView-integrated analytics for visualizing "Model Predictions" (Signals) vs. "Empirical Outcomes" (Market Price).
+- **Multisymbol Performance Matrix**: A comprehensive breakdown of Win Rates, Expected Value (EV), and PnL across the entire watchlist.
+- **Structured Telemetry**: High-precision JSON logging facilitates post-trade quantitative analysis and strategy backtesting.
 
-### Installation
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/papadacodr/kryptic-gopha.git
-   cd kryptic-gopha
-   ```
+## Developer & Research Setup
 
-2. Initialize environment variables in `.env`.
+### Prerequisites
+- Go 1.22+
+- Tier-1 Exchange API Access (Optional for Paper-trading)
 
-3. Run the Backtester or Live Bot:
-   ```bash
-   # Backtest
-   go run cmd/backtester/main.go --symbol ETHUSDT --limit 1000
-   
-   # Live Bot (Paper Mode)
-   go run cmd/server/main.go
-   ```
-
-## Configuration
-
-| Variable | Description |
-| :--- | :--- |
-| WATCHLIST | Comma-separated symbols (e.g., BTCUSDT,ETHUSDT) |
-| TP / SL | Take-Profit (0.005) and Stop-Loss (0.003) |
-| INITIAL_BALANCE | Wallet starting amount (e.g., 10000.0) |
-| RISK_PER_TRADE | % balance to risk per signal (0.01 = 1%) |
-| DAILY_LOSS_LIMIT| Drawdown limit before circuit breaker (0.05 = 5%) |
+### Execution
+```bash
+# Research-Mode: Paper Trading Engine
+go run cmd/server/main.go
+```
 
 ## Disclaimer
-
-This software is provided for educational purposes. Digital asset trading involves significant risk. The developers are not responsible for financial losses.
+This project is a quantitative research tool. Cryptocurrency markets are highly stochastic and involve extreme risk. This software is not financial advice.

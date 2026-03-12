@@ -120,14 +120,14 @@ func TestStrategy_IncrementalAccuracy(t *testing.T) {
 	}
 
 	// 1. Full calculation for baseline
-	targetEMA := calculateEMA(prices, 5)
+	targetEMA := calculateEMA(prices, 4)
 	
 	// 2. Incremental calculation
 	for i := 1; i <= len(prices); i++ {
 		s.Analyze(symbol, prices[:i])
 	}
 
-	gotEMA := s.lastEMA[symbol][5]
+	gotEMA := s.lastEMA[symbol][4]
 	
 	if !gotEMA.Equal(targetEMA) {
 		t.Errorf("Incremental EMA mismatch. Target: %s, Got: %s", targetEMA.String(), gotEMA.String())
