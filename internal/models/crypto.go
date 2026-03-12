@@ -23,6 +23,8 @@ type Signal struct {
 	Reason     string          `json:"reason"`
 	Confidence float64         `json:"confidence"`
 	Timestamp  time.Time       `json:"timestamp"`
+	TP         decimal.Decimal `json:"tp"`
+	SL         decimal.Decimal `json:"sl"`
 }
 
 type Candle struct {
