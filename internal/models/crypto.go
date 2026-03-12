@@ -12,8 +12,8 @@ type MarketTick struct {
 }
 
 type PricePoint struct {
-	Price     decimal.Decimal
-	Timestamp time.Time
+	Price     decimal.Decimal `json:"price"`
+	Timestamp time.Time       `json:"timestamp"`
 }
 
 type Signal struct {
@@ -26,13 +26,13 @@ type Signal struct {
 }
 
 type Candle struct {
-	Symbol string
-	Open   decimal.Decimal
-	High   decimal.Decimal
-	Low    decimal.Decimal
-	Close  decimal.Decimal
-	Volume decimal.Decimal
-	Time   time.Time
+	Symbol string          `json:"symbol"`
+	Open   decimal.Decimal `json:"open"`
+	High   decimal.Decimal `json:"high"`
+	Low    decimal.Decimal `json:"low"`
+	Close  decimal.Decimal `json:"close"`
+	Volume decimal.Decimal `json:"volume"`
+	Time   time.Time       `json:"timestamp"`
 }
 
 func (mt MarketTick) ToPricePoint() (PricePoint, error) {
