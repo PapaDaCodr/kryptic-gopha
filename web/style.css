@@ -143,6 +143,13 @@ body {
     font-size: 13px;
 }
 
+.trade-time {
+    display: block;
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
 .trade-dir.buy { color: var(--success); font-size: 11px; font-weight: 700; }
 .trade-dir.sell { color: var(--danger); font-size: 11px; font-weight: 700; }
 
@@ -379,6 +386,8 @@ body {
 .marker.buy { color: #3b82f6; }
 .marker.sell { color: #ef4444; }
 .marker.predict { color: rgba(255, 255, 255, 0.5); }
+.marker.tp-line { color: #10b981; font-weight: bold; }
+.marker.sl-line { color: #ef4444; font-weight: bold; }
 
 .legend-item div {
     flex: 1;

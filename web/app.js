@@ -194,9 +194,14 @@ async function updateTrades() {
             const pnlClass = isWin ? 'positive' : isLoss ? 'negative' : '';
             const pnlText = isActive ? 'Open' : formatCurrency(t.pnl);
 
+            const tradeTime = new Date(t.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
             el.innerHTML = `
                 <div class="trade-header">
-                    <span class="trade-symbol">${t.symbol}</span>
+                    <div>
+                        <span class="trade-symbol">${t.symbol}</span>
+                        <span class="trade-time">${tradeTime}</span>
+                    </div>
                     <span class="trade-dir ${t.direction.toLowerCase()}">${t.direction}</span>
                 </div>
                 <div class="trade-details">
@@ -252,15 +257,47 @@ async function loadChartData(symbol) {
         // 2. Fetch Model Predictions (Signals)
         const signalRes = await fetch(`/api/signals?symbol=${symbol}`);
         const signals = await signalRes.json();
-        
-        // Add prediction markers
-        const predictionMarkers = signals.map(s => ({
-            time: snapToMinute(new Date(s.timestamp).getTime() / 1000),
-            position: 'inBar',
-            color: 'rgba(255, 255, 255, 0.3)',
-            shape: 'circle',
-            text: `PREDICT: ${s.direction}`
-        }));
+
+        // Create price lines for TP/SL targets
+        if (state.priceLines) {
+            state.priceLines.forEach(l => state.candleSeries.removePriceLine(l));
+        }
+        state.priceLines = [];
+
+        // Add prediction markers & target lines
+        const predictionMarkers = signals.map(s => {
+            const time = snapToMinute(new Date(s.timestamp).getTime() / 1000);
+            
+            // Only add lines for recent/relevant signals to avoid clutter
+            // For this demo, we add them for all visible signals
+            if (s.tp && s.sl) {
+                const tpLine = state.candleSeries.createPriceLine({
+                    price: parseFloat(s.tp),
+                    color: '#10b981',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: `TP: ${s.direction}`,
+                });
+                const slLine = state.candleSeries.createPriceLine({
+                    price: parseFloat(s.sl),
+                    color: '#ef4444',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: `SL: ${s.direction}`,
+                });
+                state.priceLines.push(tpLine, slLine);
+            }
+
+            return {
+                time: time,
+                position: 'inBar',
+                color: 'rgba(255, 255, 255, 0.3)',
+                shape: 'circle',
+                text: `PREDICT: ${s.direction}`
+            };
+        });
 
         // Combine and set all markers
         const allMarkers = [...state.tradeMarkers, ...predictionMarkers]

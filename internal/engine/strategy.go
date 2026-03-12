@@ -30,26 +30,32 @@ func (s *EMAStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.S
 	// Bullish Crossover: shortEMA > longEMA*(1+s.Threshold)
 	thresholdMultiplier := decimal.NewFromInt(1).Add(s.Threshold)
 	if shortEMA.GreaterThan(longEMA.Mul(thresholdMultiplier)) {
+		price := prices[len(prices)-1]
 		return &models.Signal{
 			Symbol:     symbol,
-			Price:      prices[len(prices)-1],
+			Price:      price,
 			Direction:  "BUY",
 			Reason:     "EMA Bullish Crossover",
 			Confidence: 0.75,
 			Timestamp:  time.Now(),
+			TP:         price.Mul(decimal.NewFromFloat(1.05)),
+			SL:         price.Mul(decimal.NewFromFloat(0.98)),
 		}
 	}
 
 	// Bearish Crossover: shortEMA < longEMA*(1-s.Threshold)
 	thresholdMultiplierSell := decimal.NewFromInt(1).Sub(s.Threshold)
 	if shortEMA.LessThan(longEMA.Mul(thresholdMultiplierSell)) {
+		price := prices[len(prices)-1]
 		return &models.Signal{
 			Symbol:     symbol,
-			Price:      prices[len(prices)-1],
+			Price:      price,
 			Direction:  "SELL",
 			Reason:     "EMA Bearish Crossover",
 			Confidence: 0.75,
 			Timestamp:  time.Now(),
+			TP:         price.Mul(decimal.NewFromFloat(0.95)),
+			SL:         price.Mul(decimal.NewFromFloat(1.02)),
 		}
 	}
 
@@ -133,6 +139,8 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 			Reason:     fmt.Sprintf("Trend:UP (+200EMA) | RSI:%.2f", rsiFloat),
 			Confidence: confidence * 1.2, // Boost confidence due to macro alignment
 			Timestamp:  time.Now(),
+			TP:         currentPrice.Mul(decimal.NewFromFloat(1.05)),
+			SL:         currentPrice.Mul(decimal.NewFromFloat(0.98)),
 		}
 	}
 
@@ -145,6 +153,8 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 			Reason:     fmt.Sprintf("Trend:DOWN (-200EMA) | RSI:%.2f", rsiFloat),
 			Confidence: confidence * 1.2,
 			Timestamp:  time.Now(),
+			TP:         currentPrice.Mul(decimal.NewFromFloat(0.95)),
+			SL:         currentPrice.Mul(decimal.NewFromFloat(1.02)),
 		}
 	}
 
