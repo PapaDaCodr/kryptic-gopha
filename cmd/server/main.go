@@ -1,8 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"net/http"
+	"os"
 	"time"
+
 	"github.com/papadacodr/kryptic-gopha/internal/engine"
 	"github.com/papadacodr/kryptic-gopha/internal/ingester"
 )
@@ -36,6 +40,24 @@ func main() {
 		for range ticker.C {
 			log.Printf("\n==== ACCURACY REPORT ====\nTotal Signals: %d\nWin Rate: %.2f%%\n=========================\n",
 				trader.TotalWins+trader.TotalLosses, trader.GetWinRate())
+		}
+	}()
+
+	// HTTP Server for Deployment (Health Check)
+	go func() {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8080"
+		}
+
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "Kryptic Gopha Bot is Running\nTotal Signals: %d\nWin Rate: %.2f%%", 
+				trader.TotalWins+trader.TotalLosses, trader.GetWinRate())
+		})
+
+		log.Printf("Starting health check server on port %s", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			log.Printf("HTTP server failed: %v", err)
 		}
 	}()
 
