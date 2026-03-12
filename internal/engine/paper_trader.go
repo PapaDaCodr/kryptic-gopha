@@ -14,6 +14,8 @@ type Trade struct {
 	Direction  string
 	Time       time.Time
 	Exits      map[int]float64 // minute -> price
+	Status     string          // "ACTIVE", "WIN", "LOSS"
+	ExitPrice  float64
 }
 
 type PaperTrader struct {
@@ -22,12 +24,16 @@ type PaperTrader struct {
 	Completed    []Trade
 	TotalWins    int
 	TotalLosses  int
+	TP           float64 // Take Profit Percentage (e.g. 0.01 for 1%)
+	SL           float64 // Stop Loss Percentage (e.g. 0.005 for 0.5%)
 }
 
 func NewPaperTrader() *PaperTrader {
 	return &PaperTrader{
 		ActiveTrades: make([]Trade, 0),
 		Completed:    make([]Trade, 0),
+		TP:           0.005, // 0.5% default take profit
+		SL:           0.003, // 0.3% default stop loss
 	}
 }
 
@@ -41,11 +47,12 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		Direction:  sig.Direction,
 		Time:       sig.Timestamp,
 		Exits:      make(map[int]float64),
+		Status:     "ACTIVE",
 	}
 	p.ActiveTrades = append(p.ActiveTrades, trade)
 }
 
-func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice float64) {
+func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice float64, now time.Time) {
 	p.Lock()
 	defer p.Unlock()
 
@@ -55,36 +62,68 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice float64) {
 			continue
 		}
 
-		duration := time.Since(t.Time).Minutes()
+		isWin := false
+		isLoss := false
+
+		if t.Direction == "BUY" {
+			if currentPrice >= t.EntryPrice*(1+p.TP) {
+				isWin = true
+			} else if currentPrice <= t.EntryPrice*(1-p.SL) {
+				isLoss = true
+			}
+		} else {
+			if currentPrice <= t.EntryPrice*(1-p.TP) {
+				isWin = true
+			} else if currentPrice >= t.EntryPrice*(1+p.SL) {
+				isLoss = true
+			}
+		}
+
+		if isWin || isLoss {
+			t.Status = map[bool]string{true: "WIN", false: "LOSS"}[isWin]
+			t.ExitPrice = currentPrice
+			if isWin {
+				p.TotalWins++
+			} else {
+				p.TotalLosses++
+			}
+			fmt.Printf("\n[TARGET HIT] %s %s | Entry: %.2f | Exit: %.2f | Result: %s\n", 
+				t.Symbol, t.Direction, t.EntryPrice, currentPrice, t.Status)
+			
+			p.Completed = append(p.Completed, *t)
+			p.ActiveTrades = append(p.ActiveTrades[:i], p.ActiveTrades[i+1:]...)
+			i--
+			continue
+		}
+
+		duration := now.Sub(t.Time).Minutes()
 		
 		checkIntervals := []int{1, 5, 10}
 		for _, interval := range checkIntervals {
 			if duration >= float64(interval) && t.Exits[interval] == 0 {
 				t.Exits[interval] = currentPrice
-				
-				// Calculate win/loss specifically for the 5-minute benchmark
-				if interval == 5 {
-					isWin := false
-					if t.Direction == "BUY" && currentPrice > t.EntryPrice {
-						isWin = true
-					} else if t.Direction == "SELL" && currentPrice < t.EntryPrice {
-						isWin = true
-					}
-
-					if isWin {
-						p.TotalWins++
-					} else {
-						p.TotalLosses++
-					}
-					
-					fmt.Printf("\n[BENCHMARK] %s %s at %f | 5m Price: %f | Result: %s\n", 
-						t.Symbol, t.Direction, t.EntryPrice, currentPrice, map[bool]string{true: "WIN", false: "LOSS"}[isWin])
-				}
 			}
 		}
 
-		// Move to completed if all intervals checked
 		if t.Exits[10] != 0 {
+			isWinAt10 := false
+			if t.Direction == "BUY" && currentPrice > t.EntryPrice {
+				isWinAt10 = true
+			} else if t.Direction == "SELL" && currentPrice < t.EntryPrice {
+				isWinAt10 = true
+			}
+
+			t.Status = map[bool]string{true: "WIN", false: "LOSS"}[isWinAt10]
+			t.ExitPrice = currentPrice
+			if isWinAt10 {
+				p.TotalWins++
+			} else {
+				p.TotalLosses++
+			}
+			
+			fmt.Printf("\n[TIME EXIT] %s %s | Entry: %.2f | Exit: %.2f | Result: %s\n", 
+				t.Symbol, t.Direction, t.EntryPrice, currentPrice, t.Status)
+
 			p.Completed = append(p.Completed, *t)
 			p.ActiveTrades = append(p.ActiveTrades[:i], p.ActiveTrades[i+1:]...)
 			i--
