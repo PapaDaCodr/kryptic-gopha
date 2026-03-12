@@ -46,9 +46,12 @@ func main() {
 		getEnvInt("RSI_PERIOD", 14),
 	)
 
-	trader := engine.NewPaperTrader()
+	trader := engine.NewPaperTrader(getEnvFloat("INITIAL_BALANCE", 10000.0))
 	trader.TP = getEnvDecimal("TP", "0.005")
 	trader.SL = getEnvDecimal("SL", "0.003")
+	trader.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.01")
+	trader.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.05")
+	trader.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
 
 	// 3. Load previous state if exists
 	if _, err := os.Stat(stateFile); err == nil {
@@ -183,4 +186,13 @@ func getEnvDecimal(key string, fallback string) decimal.Decimal {
 	}
 	d, _ := decimal.NewFromString(fallback)
 	return d
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if val := os.Getenv(key); val != "" {
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return f
+		}
+	}
+	return fallback
 }

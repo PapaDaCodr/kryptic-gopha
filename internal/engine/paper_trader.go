@@ -14,11 +14,13 @@ import (
 type Trade struct {
 	Symbol     string                  `json:"symbol"`
 	EntryPrice decimal.Decimal         `json:"entry_price"`
+	Quantity   decimal.Decimal         `json:"quantity"`
 	Direction  string                  `json:"direction"`
 	Time       time.Time               `json:"time"`
 	Exits      map[int]decimal.Decimal `json:"exits"`
 	Status     string                  `json:"status"`
 	ExitPrice  decimal.Decimal         `json:"exit_price"`
+	PnL        decimal.Decimal         `json:"pnl"`
 }
 
 type PaperTrader struct {
@@ -27,16 +29,37 @@ type PaperTrader struct {
 	Completed    []Trade             `json:"completed"`
 	TotalWins    int                 `json:"total_wins"`
 	TotalLosses  int                 `json:"total_losses"`
+	
+	// Risk Management Settings
 	TP           decimal.Decimal     `json:"tp"`
 	SL           decimal.Decimal     `json:"sl"`
+	Balance      decimal.Decimal     `json:"balance"`       // Current wallet balance
+	InitialBalance decimal.Decimal   `json:"initial_balance"`
+	RiskPerTrade decimal.Decimal     `json:"risk_per_trade"` // % of balance to risk per trade (e.g., 0.01 for 1%)
+	MaxOpenTrades int                `json:"max_open_trades"`
+	DailyLossLimit decimal.Decimal   `json:"daily_loss_limit"` // % of initial balance (e.g., 0.05 for 5%)
+	
+	// Circuit Breaker State
+	TradingEnabled bool              `json:"trading_enabled"`
+	LastDailyReset time.Time         `json:"last_daily_reset"`
+	DailyPnL       decimal.Decimal   `json:"daily_pnl"`
 }
 
-func NewPaperTrader() *PaperTrader {
+func NewPaperTrader(balance float64) *PaperTrader {
+	bal := decimal.NewFromFloat(balance)
 	return &PaperTrader{
-		ActiveTrades: make(map[string][]*Trade),
-		Completed:    make([]Trade, 0),
-		TP:           decimal.NewFromFloat(0.005),
-		SL:           decimal.NewFromFloat(0.003),
+		ActiveTrades:   make(map[string][]*Trade),
+		Completed:      make([]Trade, 0),
+		TP:             decimal.NewFromFloat(0.005),
+		SL:             decimal.NewFromFloat(0.003),
+		Balance:        bal,
+		InitialBalance: bal,
+		RiskPerTrade:   decimal.NewFromFloat(0.01), // 1% default risk
+		MaxOpenTrades:  5,
+		DailyLossLimit: decimal.NewFromFloat(0.05), // 5% daily limit
+		TradingEnabled: true,
+		LastDailyReset: time.Now(),
+		DailyPnL:       decimal.Zero,
 	}
 }
 
@@ -44,9 +67,33 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 	p.Lock()
 	defer p.Unlock()
 
+	if !p.TradingEnabled {
+		log.Warn().Str("symbol", sig.Symbol).Msg("Trade ignored: Circuit breaker active")
+		return
+	}
+
+	p.checkDailyReset()
+
+	// Check Max Concurrent Trades
+	activeCount := 0
+	for _, trades := range p.ActiveTrades {
+		activeCount += len(trades)
+	}
+	if activeCount >= p.MaxOpenTrades {
+		log.Warn().Int("limit", p.MaxOpenTrades).Msg("Trade ignored: Max open trades reached")
+		return
+	}
+
+	// Dynamic Position Sizing
+	// Size = (Balance * RiskPerTrade) / SL_Amount
+	// If SL is 0.3%, we risk 1% of balance.
+	riskAmount := p.Balance.Mul(p.RiskPerTrade)
+	quantity := riskAmount.Div(sig.Price.Mul(p.SL))
+
 	trade := &Trade{
 		Symbol:     sig.Symbol,
 		EntryPrice: sig.Price,
+		Quantity:   quantity,
 		Direction:  sig.Direction,
 		Time:       sig.Timestamp,
 		Exits:      make(map[int]decimal.Decimal),
@@ -58,6 +105,7 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		Str("symbol", sig.Symbol).
 		Str("direction", sig.Direction).
 		Str("price", sig.Price.String()).
+		Str("quantity", quantity.StringFixed(4)).
 		Msg("New trade opened")
 }
 
@@ -91,24 +139,7 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 		}
 
 		if isWin || isLoss {
-			t.Status = "LOSS"
-			if isWin {
-				t.Status = "WIN"
-				p.TotalWins++
-			} else {
-				p.TotalLosses++
-			}
-			t.ExitPrice = currentPrice
-			
-			log.Info().
-				Str("symbol", t.Symbol).
-				Str("direction", t.Direction).
-				Str("entry", t.EntryPrice.String()).
-				Str("exit", currentPrice.String()).
-				Str("result", t.Status).
-				Msg("Target hit")
-			
-			p.Completed = append(p.Completed, *t)
+			p.closeTrade(t, currentPrice, isWin)
 			continue
 		}
 
@@ -127,25 +158,7 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 			} else if t.Direction == "SELL" && currentPrice.LessThan(t.EntryPrice) {
 				isWinAt10 = true
 			}
-
-			t.Status = "LOSS"
-			if isWinAt10 {
-				t.Status = "WIN"
-				p.TotalWins++
-			} else {
-				p.TotalLosses++
-			}
-			t.ExitPrice = currentPrice
-			
-			log.Info().
-				Str("symbol", t.Symbol).
-				Str("direction", t.Direction).
-				Str("entry", t.EntryPrice.String()).
-				Str("exit", currentPrice.String()).
-				Str("result", t.Status).
-				Msg("Time exit")
-
-			p.Completed = append(p.Completed, *t)
+			p.closeTrade(t, currentPrice, isWinAt10)
 			continue
 		}
 
@@ -156,6 +169,63 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 		delete(p.ActiveTrades, symbol)
 	} else {
 		p.ActiveTrades[symbol] = remainingTrades
+	}
+}
+
+func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin bool) {
+	t.Status = "LOSS"
+	if isWin {
+		t.Status = "WIN"
+		p.TotalWins++
+	} else {
+		p.TotalLosses++
+	}
+	t.ExitPrice = currentPrice
+
+	// Calculate PnL: (Exit - Entry) * Qty for BUY, (Entry - Exit) * Qty for SELL
+	var pnl decimal.Decimal
+	if t.Direction == "BUY" {
+		pnl = t.ExitPrice.Sub(t.EntryPrice).Mul(t.Quantity)
+	} else {
+		pnl = t.EntryPrice.Sub(t.ExitPrice).Mul(t.Quantity)
+	}
+	
+	t.PnL = pnl
+	p.Balance = p.Balance.Add(pnl)
+	p.DailyPnL = p.DailyPnL.Add(pnl)
+
+	log.Info().
+		Str("symbol", t.Symbol).
+		Str("direction", t.Direction).
+		Str("entry", t.EntryPrice.String()).
+		Str("exit", currentPrice.String()).
+		Str("pnl", pnl.StringFixed(2)).
+		Str("result", t.Status).
+		Msg("Trade closed")
+
+	// Check Circuit Breaker
+	lossLimit := p.InitialBalance.Mul(p.DailyLossLimit).Neg()
+	if p.DailyPnL.LessThanOrEqual(lossLimit) {
+		p.TradingEnabled = false
+		log.Error().
+			Str("daily_pnl", p.DailyPnL.StringFixed(2)).
+			Str("limit", lossLimit.StringFixed(2)).
+			Msg("CIRCUIT BREAKER TRIGGERED: Daily loss limit hit. Trading suspended.")
+	}
+	
+	p.Completed = append(p.Completed, *t)
+}
+
+func (p *PaperTrader) checkDailyReset() {
+	now := time.Now()
+	if now.YearDay() != p.LastDailyReset.YearDay() || now.Year() != p.LastDailyReset.Year() {
+		log.Info().
+			Str("prev_daily_pnl", p.DailyPnL.StringFixed(2)).
+			Msg("Daily risk reset. Trading re-enabled if it was suspended.")
+		p.DailyPnL = decimal.Zero
+		p.TradingEnabled = true
+		p.InitialBalance = p.Balance // Set new baseline for today
+		p.LastDailyReset = now
 	}
 }
 
