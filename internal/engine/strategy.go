@@ -53,56 +53,124 @@ func (s *EMAStrategy) Analyze(symbol string, prices []float64) *models.Signal {
 	return nil
 }
 
-// MultiFactorStrategy combines multiple indicators for high accuracy
-type MultiFactorStrategy struct {
+// EfficientMultiFactorStrategy uses caching to avoid redundant calculations
+type EfficientMultiFactorStrategy struct {
 	ShortPeriod int
 	LongPeriod  int
 	RSIPeriod   int
+	
+	// State per symbol
+	lastEMA     map[string]map[int]float64 // symbol -> period -> value
+	lastAvgGain map[string]float64
+	lastAvgLoss map[string]float64
+	initialized map[string]bool
 }
 
-func (s *MultiFactorStrategy) Analyze(symbol string, prices []float64) *models.Signal {
+func NewEfficientStrategy(short, long, rsi int) *EfficientMultiFactorStrategy {
+	return &EfficientMultiFactorStrategy{
+		ShortPeriod: short,
+		LongPeriod:  long,
+		RSIPeriod:   rsi,
+		lastEMA:     make(map[string]map[int]float64),
+		lastAvgGain: make(map[string]float64),
+		lastAvgLoss: make(map[string]float64),
+		initialized: make(map[string]bool),
+	}
+}
+
+func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []float64) *models.Signal {
 	if len(prices) < s.LongPeriod || len(prices) < s.RSIPeriod+1 {
 		return nil
 	}
 
-	shortEMA := calculateEMA(prices, s.ShortPeriod)
-	longEMA := calculateEMA(prices, s.LongPeriod)
-	rsi := calculateRSI(prices, s.RSIPeriod)
-
 	currentPrice := prices[len(prices)-1]
 
-	// Dynamic Confidence Calculation
-	// Higher RSI deviation from 50 = higher confidence
+	if _, ok := s.lastEMA[symbol]; !ok {
+		s.lastEMA[symbol] = make(map[int]float64)
+		s.lastEMA[symbol][s.ShortPeriod] = calculateEMA(prices[:len(prices)-1], s.ShortPeriod)
+		s.lastEMA[symbol][s.LongPeriod] = calculateEMA(prices[:len(prices)-1], s.LongPeriod)
+	}
+
+	shortEMA := updateEMA(s.lastEMA[symbol][s.ShortPeriod], currentPrice, s.ShortPeriod)
+	longEMA := updateEMA(s.lastEMA[symbol][s.LongPeriod], currentPrice, s.LongPeriod)
+	
+	s.lastEMA[symbol][s.ShortPeriod] = shortEMA
+	s.lastEMA[symbol][s.LongPeriod] = longEMA
+
+	rsi := s.calculateIncrementalRSI(symbol, prices)
+	
 	confidence := 0.5 + (0.4 * (func(v float64) float64 {
 		if v > 50 { return (v - 50) / 50 }
 		return (50 - v) / 50
 	}(rsi)))
 
-	// High-accuracy BUY: EMA Bullish + RSI < 40
 	if shortEMA > longEMA && rsi < 40 {
 		return &models.Signal{
 			Symbol:     symbol,
 			Price:      currentPrice,
 			Direction:  "BUY",
-			Reason:     fmt.Sprintf("Trend:UP | RSI:%.2f (Oversold)", rsi),
+			Reason:     fmt.Sprintf("Trend:UP | RSI:%.2f", rsi),
 			Confidence: confidence,
 			Timestamp:  time.Now(),
 		}
 	}
 
-	// High-accuracy SELL: EMA Bearish + RSI > 60
 	if shortEMA < longEMA && rsi > 60 {
 		return &models.Signal{
 			Symbol:     symbol,
 			Price:      currentPrice,
 			Direction:  "SELL",
-			Reason:     fmt.Sprintf("Trend:DOWN | RSI:%.2f (Overbought)", rsi),
+			Reason:     fmt.Sprintf("Trend:DOWN | RSI:%.2f", rsi),
 			Confidence: confidence,
 			Timestamp:  time.Now(),
 		}
 	}
 
 	return nil
+}
+
+func updateEMA(prevEMA, currentPrice float64, period int) float64 {
+	multiplier := 2.0 / (float64(period) + 1.0)
+	return (currentPrice-prevEMA)*multiplier + prevEMA
+}
+
+func (s *EfficientMultiFactorStrategy) calculateIncrementalRSI(symbol string, prices []float64) float64 {
+	currIdx := len(prices) - 1
+	prevIdx := len(prices) - 2
+	change := prices[currIdx] - prices[prevIdx]
+	
+	gain := 0.0
+	loss := 0.0
+	if change > 0 {
+		gain = change
+	} else {
+		loss = -change
+	}
+
+	if !s.initialized[symbol] {
+		var initialGain, initialLoss float64
+		for i := 1; i <= s.RSIPeriod; i++ {
+			c := prices[i] - prices[i-1]
+			if c > 0 {
+				initialGain += c
+			} else {
+				initialLoss -= c
+			}
+		}
+		s.lastAvgGain[symbol] = initialGain / float64(s.RSIPeriod)
+		s.lastAvgLoss[symbol] = initialLoss / float64(s.RSIPeriod)
+		s.initialized[symbol] = true
+	} else {
+		s.lastAvgGain[symbol] = (s.lastAvgGain[symbol]*float64(s.RSIPeriod-1) + gain) / float64(s.RSIPeriod)
+		s.lastAvgLoss[symbol] = (s.lastAvgLoss[symbol]*float64(s.RSIPeriod-1) + loss) / float64(s.RSIPeriod)
+	}
+
+	if s.lastAvgLoss[symbol] == 0 {
+		return 100
+	}
+
+	rs := s.lastAvgGain[symbol] / s.lastAvgLoss[symbol]
+	return 100 - (100 / (1 + rs))
 }
 
 

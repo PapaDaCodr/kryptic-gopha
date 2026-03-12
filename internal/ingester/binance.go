@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 const (
 	binanceStreamURL       = "wss://stream.binance.com:9443/stream?streams="
+	binanceRestURL         = "https://api.binance.com"
 	streamSuffix           = "@trade"
 	initialRetryDelay      = time.Second
 	maxRetryDelay          = 30 * time.Second
@@ -22,6 +24,33 @@ const (
 	readTimeout            = 90 * time.Second
 	writeTimeout           = 10 * time.Second
 )
+
+func FetchHistoricalKlines(symbol, interval string, limit int) ([]models.MarketTick, error) {
+	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=%s&limit=%d", binanceRestURL, symbol, interval, limit)
+	
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var raw [][]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+
+	ticks := make([]models.MarketTick, 0, len(raw))
+	for _, kline := range raw {
+		// Kline format: [Open time, Open, High, Low, Close, Volume, Close time, ...]
+		ticks = append(ticks, models.MarketTick{
+			Symbol:    symbol,
+			Price:     kline[4].(string), // Close price
+			Timestamp: int64(kline[6].(float64)), // Close time
+		})
+	}
+
+	return ticks, nil
+}
 
 
 
