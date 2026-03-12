@@ -86,6 +86,13 @@ func main() {
 				return fmt.Sprintf("🤖 *Bot Status*\n\nStatus: %s\nBalance: $%s\nDaily PnL: $%s\nActive Trades: %d", 
 					status, trader.Balance.StringFixed(2), trader.DailyPnL.StringFixed(2), active)
 					
+			case "/help", "/start":
+				return "🤖 *Kryptic Gopha Commands*\n\n" +
+					"• `/status` - Show bot health and PnL\n" +
+					"• `/setbalance <amt>` - Update trading capital\n" +
+					"• `/stop` - Emergency trading suspension\n" +
+					"• `/help` - Show this list"
+
 			case "/stop":
 				trader.Lock()
 				defer trader.Unlock()
@@ -120,6 +127,12 @@ func main() {
 			log.Warn().Err(err).Msg("Failed to load state file")
 		} else {
 			log.Info().Msg("Previous state loaded successfully")
+			// RE-APPLY CONFIG OVERRIDES (State loads old params, we want .env to win)
+			trader.TP = getEnvDecimal("TP", "0.05")
+			trader.SL = getEnvDecimal("SL", "0.02")
+			trader.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.015")
+			trader.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.02")
+			trader.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
 		}
 	}
 
@@ -215,6 +228,16 @@ func main() {
 			"active":    trader.ActiveTrades,
 			"completed": trader.Completed,
 		})
+	})
+
+	mux.HandleFunc("/api/signals", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		symbol := r.URL.Query().Get("symbol")
+		if symbol == "" {
+			http.Error(w, `{"error":"symbol required"}`, http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(mgr.GetSignals(symbol))
 	})
 
 	mux.HandleFunc("/api/candles", func(w http.ResponseWriter, r *http.Request) {

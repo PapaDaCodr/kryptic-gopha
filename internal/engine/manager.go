@@ -16,6 +16,7 @@ type symbolState struct {
 	currentCandle  *models.Candle
 	lastSignalType string
 	lastSignalTime time.Time
+	signalHistory  []models.Signal // Stores recent predictions/signals
 }
 
 type EngineManager struct {
@@ -96,9 +97,16 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	return nil
 }
 
+// analyzeInternal runs the strategy and records signals
 func (m *EngineManager) analyzeInternal(symbol string, state *symbolState) {
 	history := state.buffer.GetHistory()
 	if signal := m.Strategy.Analyze(symbol, history); signal != nil {
+		// Store in history for dashboard
+		state.signalHistory = append(state.signalHistory, *signal)
+		if len(state.signalHistory) > 100 {
+			state.signalHistory = state.signalHistory[1:]
+		}
+
 		if signal.Direction != state.lastSignalType || time.Since(state.lastSignalTime) > 5*time.Minute {
 			state.lastSignalType = signal.Direction
 			state.lastSignalTime = time.Now()
@@ -124,5 +132,18 @@ func (m *EngineManager) GetCandles(symbol string) []models.Candle {
 	// Return a copy of history
 	res := make([]models.Candle, len(state.history))
 	copy(res, state.history)
+	return res
+}
+// GetSignals returns the recent signal history for a symbol
+func (m *EngineManager) GetSignals(symbol string) []models.Signal {
+	state, exists := m.states[symbol]
+	if !exists {
+		return nil
+	}
+	state.Lock()
+	defer state.Unlock()
+
+	res := make([]models.Signal, len(state.signalHistory))
+	copy(res, state.signalHistory)
 	return res
 }

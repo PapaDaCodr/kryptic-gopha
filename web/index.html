@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kryptic Gopha Dashboard</title>
-    <!-- TradingView Lightweight Charts -->
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <!-- TradingView Lightweight Charts (Pinned v4.1.1) -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <link rel="stylesheet" href="style.css">
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -62,11 +62,77 @@
                 <div class="chart-legend" id="chart-legend">
                     Loading data...
                 </div>
+                <button id="btn-legend" class="btn-icon">💡 Legend</button>
             </header>
+            
+            <div class="legend-overlay" id="legend-modal" style="display: none;">
+                <div class="legend-content">
+                    <div class="legend-header">
+                        <h3>Indicator Quick Reference</h3>
+                        <button class="close-btn" id="close-legend">&times;</button>
+                    </div>
+                    <div class="legend-body">
+                        <div class="legend-item">
+                            <span class="marker buy">▲</span>
+                            <div>
+                                <strong>EXEC: BUY</strong>
+                                <p>Signal executed as a LONG position. Triggered by EMA convergence + RSI oversold.</p>
+                            </div>
+                        </div>
+                        <div class="legend-item">
+                            <span class="marker sell">▼</span>
+                            <div>
+                                <strong>EXEC: SELL</strong>
+                                <p>Signal executed as a SHORT position. Triggered by EMA crossover + RSI overbought.</p>
+                            </div>
+                        </div>
+                        <div class="legend-item">
+                            <span class="marker predict">○</span>
+                            <div>
+                                <strong>PREDICT: SIGNAL</strong>
+                                <p>Model generated a prediction, but execution was skipped (e.g. trend bias filter or risk limit).</p>
+                            </div>
+                        </div>
+                        <div class="legend-item">
+                            <span class="marker chart-candle">🕯️</span>
+                            <div>
+                                <strong>Candlesticks</strong>
+                                <p>OHLC minute-aggregate price action. Green = Bullish, Red = Bearish.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
             
             <div class="chart-container" id="chart">
                 <!-- Lightweight chart injected here -->
             </div>
+
+            <!-- Multisymbol Summary -->
+            <section class="summary-section">
+                <div class="section-header">
+                    <h2>Market Performance Overview</h2>
+                    <span class="badge">Session Stats</span>
+                </div>
+                <div class="table-card">
+                    <table class="summary-table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Trades</th>
+                                <th>Wins</th>
+                                <th>Losses</th>
+                                <th>Win Rate</th>
+                                <th>Total PnL</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="summary-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
         </main>
     </div>
 
