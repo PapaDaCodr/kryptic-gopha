@@ -1,9 +1,9 @@
 package ingester
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/papadacodr/kryptic-gopha/internal/engine"
 	"github.com/papadacodr/kryptic-gopha/internal/models"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -34,6 +35,10 @@ func FetchHistoricalKlines(symbol, interval string, limit int) ([]models.MarketT
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("binance api error: %s", resp.Status)
+	}
+
 	var raw [][]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, err
@@ -41,44 +46,50 @@ func FetchHistoricalKlines(symbol, interval string, limit int) ([]models.MarketT
 
 	ticks := make([]models.MarketTick, 0, len(raw))
 	for _, kline := range raw {
-		// Kline format: [Open time, Open, High, Low, Close, Volume, Close time, ...]
 		ticks = append(ticks, models.MarketTick{
 			Symbol:    symbol,
-			Price:     kline[4].(string), // Close price
-			Timestamp: int64(kline[6].(float64)), // Close time
+			Price:     kline[4].(string),
+			Timestamp: int64(kline[6].(float64)),
 		})
 	}
 
 	return ticks, nil
 }
 
-
-
-
-func StartBinanceStream(symbols []string, mgr *engine.EngineManager) {
+func StartBinanceStream(ctx context.Context, symbols []string, mgr *engine.EngineManager) {
 	normalizedSymbols := normalizeSymbols(symbols)
 	url := binanceStreamURL + strings.Join(normalizedSymbols, "/")
 
 	retryDelay := initialRetryDelay
 
 	for {
-		conn, err := connectToBinance(url)
-		if err != nil {
-			log.Printf("Failed to connect to Binance: %v. Retrying in %v", err, retryDelay)
-			time.Sleep(retryDelay)
-			retryDelay = increaseRetryDelay(retryDelay)
-			continue
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("Binance stream shutting down")
+			return
+		default:
+			conn, err := connectToBinance(url)
+			if err != nil {
+				log.Error().Err(err).Dur("retry_in", retryDelay).Msg("Binance connection failed")
+				time.Sleep(retryDelay)
+				retryDelay = increaseRetryDelay(retryDelay)
+				continue
+			}
+
+			log.Info().Int("symbols", len(symbols)).Msg("Connected to Binance WebSocket")
+			retryDelay = initialRetryDelay 
+
+			connCtx, cancel := context.WithCancel(ctx)
+			
+			go monitorConnection(connCtx, conn)
+			handleConnectionClosed(conn, mgr)
+			
+			cancel()
+			conn.Close()
+			log.Warn().Msg("Binance connection closed, reconnecting...")
 		}
-
-		log.Printf("Successfully connected to Binance WebSocket. Streaming %d symbols", len(symbols))
-		retryDelay = initialRetryDelay 
-
-		go monitorConnection(conn)
-		handleConnectionClosed(conn, mgr)
-		conn.Close()
 	}
 }
-
 
 func normalizeSymbols(symbols []string) []string {
 	normalized := make([]string, len(symbols))
@@ -104,14 +115,19 @@ func increaseRetryDelay(currentDelay time.Duration) time.Duration {
 	return newDelay
 }
 
-func monitorConnection(conn *websocket.Conn) {
+func monitorConnection(ctx context.Context, conn *websocket.Conn) {
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-			log.Printf("Failed to send ping: %v", err)
+	for {
+		select {
+		case <-ticker.C:
+			conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+				log.Warn().Err(err).Msg("Ping failed")
+				return
+			}
+		case <-ctx.Done():
 			return
 		}
 	}
@@ -125,13 +141,13 @@ func handleConnectionClosed(conn *websocket.Conn, mgr *engine.EngineManager) {
 	})
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(readTimeout))
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("Connection closed: %v", err)
+			log.Error().Err(err).Msg("Read error")
 			return
 		}
 
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
 		processMarketData(message, mgr)
 	}
 }
@@ -142,12 +158,23 @@ func processMarketData(message []byte, mgr *engine.EngineManager) {
 	}
 
 	if err := json.Unmarshal(message, &payload); err != nil {
-		log.Printf("Failed to unmarshal market data: %v", err)
+		var multiPayload struct {
+			Stream string            `json:"stream"`
+			Data   models.MarketTick `json:"data"`
+		}
+		if err2 := json.Unmarshal(message, &multiPayload); err2 == nil {
+			payload.Data = multiPayload.Data
+		} else {
+			log.Error().Err(err).Msg("Market data unmarshal failed")
+			return
+		}
+	}
+
+	if payload.Data.Symbol == "" {
 		return
 	}
 
 	if err := mgr.UpdatePrice(payload.Data); err != nil {
-		log.Printf("Failed to update price for %s: %v", payload.Data.Symbol, err)
+		log.Error().Err(err).Str("symbol", payload.Data.Symbol).Msg("Price update failed")
 	}
 }
-

@@ -1,8 +1,8 @@
 package models
 
 import (
-	"strconv"
 	"time"
+	"github.com/shopspring/decimal"
 )
 
 type MarketTick struct {
@@ -12,31 +12,31 @@ type MarketTick struct {
 }
 
 type PricePoint struct {
-	Price     float64
+	Price     decimal.Decimal
 	Timestamp time.Time
 }
 
 type Signal struct {
-	Symbol     string    `json:"symbol"`
-	Price      float64   `json:"price"`
-	Direction  string    `json:"direction"`
-	Reason     string    `json:"reason"`
-	Confidence float64   `json:"confidence"`
-	Timestamp  time.Time `json:"timestamp"`
+	Symbol     string          `json:"symbol"`
+	Price      decimal.Decimal `json:"price"`
+	Direction  string          `json:"direction"`
+	Reason     string          `json:"reason"`
+	Confidence float64         `json:"confidence"`
+	Timestamp  time.Time       `json:"timestamp"`
 }
 
 type Candle struct {
 	Symbol string
-	Open   float64
-	High   float64
-	Low    float64
-	Close  float64
-	Volume float64
+	Open   decimal.Decimal
+	High   decimal.Decimal
+	Low    decimal.Decimal
+	Close  decimal.Decimal
+	Volume decimal.Decimal
 	Time   time.Time
 }
 
 func (mt MarketTick) ToPricePoint() (PricePoint, error) {
-	p, err := strconv.ParseFloat(mt.Price, 64)
+	p, err := decimal.NewFromString(mt.Price)
 	if err != nil {
 		return PricePoint{}, err
 	}
@@ -48,3 +48,4 @@ func (mt MarketTick) ToPricePoint() (PricePoint, error) {
 		Timestamp: ts,
 	}, nil
 }
+

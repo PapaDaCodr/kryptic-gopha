@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/papadacodr/kryptic-gopha/internal/models"
+	"github.com/rs/zerolog/log"
 )
 
 type symbolState struct {
@@ -27,7 +28,7 @@ func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trade
 	mgr := &EngineManager{
 		states:   make(map[string]*symbolState),
 		Strategy: strategy,
-		Signals:  make(chan models.Signal, 100),
+		Signals:  make(chan models.Signal, 1000),
 		Trader:   trader,
 	}
 	
@@ -50,7 +51,6 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 		return fmt.Errorf("received data for untracked symbol: %s", tick.Symbol)
 	}
 
-	// Update PaperTrader with every tick for precise benchmarking
 	if m.Trader != nil {
 		m.Trader.UpdateMetrics(tick.Symbol, point.Price, point.Timestamp)
 	}
@@ -58,18 +58,15 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	state.Lock()
 	defer state.Unlock()
 
-	// OHLCV Smoothing (1-minute candles)
 	curr := state.currentCandle
 	tickTime := point.Timestamp.Truncate(time.Minute)
 
 	if curr == nil || tickTime.After(curr.Time) {
-		// New minute started: Close old candle and process it
 		if curr != nil {
 			state.buffer.Add(curr.Close)
 			m.analyzeInternal(tick.Symbol, state)
 		}
 
-		// Initialize new candle
 		state.currentCandle = &models.Candle{
 			Symbol: tick.Symbol,
 			Open:   point.Price,
@@ -78,12 +75,12 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 			Close:  point.Price,
 			Time:   tickTime,
 		}
+		log.Debug().Str("symbol", tick.Symbol).Time("time", tickTime).Msg("New candle started")
 	} else {
-		// Update current candle
-		if point.Price > curr.High {
+		if point.Price.GreaterThan(curr.High) {
 			curr.High = point.Price
 		}
-		if point.Price < curr.Low {
+		if point.Price.LessThan(curr.Low) {
 			curr.Low = point.Price
 		}
 		curr.Close = point.Price
@@ -98,7 +95,12 @@ func (m *EngineManager) analyzeInternal(symbol string, state *symbolState) {
 		if signal.Direction != state.lastSignalType || time.Since(state.lastSignalTime) > 5*time.Minute {
 			state.lastSignalType = signal.Direction
 			state.lastSignalTime = time.Now()
-			m.Signals <- *signal
+			
+			select {
+			case m.Signals <- *signal:
+			default:
+				log.Warn().Str("symbol", symbol).Msg("Signal channel full. Dropping signal")
+			}
 		}
 	}
 }
