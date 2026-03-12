@@ -103,4 +103,17 @@ func (m *EngineManager) analyzeInternal(symbol string, state *symbolState) {
 			}
 		}
 	}
+}// GetCandles returns the recent OHLCV history for a symbol
+func (m *EngineManager) GetCandles(symbol string) []models.PricePoint {
+state, exists := m.states[symbol]
+if !exists {
+ nil
+}
+state.Lock()
+defer state.Unlock()
+
+history := state.buffer.GetHistory()
+result := make([]models.PricePoint, len(history))
+copy(result, history)
+return result
 }
