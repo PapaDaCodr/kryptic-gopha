@@ -26,9 +26,10 @@ func startBinanceStream(symbols []string) {
 		log.Fatal("Error connecting to Binance WebSocket:", err)
 	}
 	defer conn.Close()
+	log.Println("Connected to Binance WebSocket for symbols:", symbols)	
 	
 	for {
-		_, err := conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Println("Error reading message:", err)
 			return
@@ -39,4 +40,6 @@ func startBinanceStream(symbols []string) {
 		}
 		if err := json.Unmarshal(message, &payload); err == nil {
 			log.Printf("[%s] Current Price: $%s", payload.Data.Symbol, payload.Data.Price)
+		}
 	}
+}
