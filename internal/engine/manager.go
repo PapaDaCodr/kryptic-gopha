@@ -8,30 +8,33 @@ import (
 	"github.com/papadacodr/kryptic-gopha/internal/models"
 )
 
-type EngineManager struct {
+type symbolState struct {
 	sync.Mutex
-	Buffers         map[string]*PriceBuffer
-	Strategy        Strategy
-	Signals         chan models.Signal
-	lastSignalType  map[string]string         // symbol -> "BUY"/"SELL"
-	lastSignalTime  map[string]time.Time      // symbol -> timestamp
-	currentCandles  map[string]*models.Candle // current open candle
-	Trader          *PaperTrader              // Benchmarking tool
+	buffer         *PriceBuffer
+	currentCandle  *models.Candle
+	lastSignalType string
+	lastSignalTime time.Time
+}
+
+type EngineManager struct {
+	states   map[string]*symbolState
+	Strategy Strategy
+	Signals  chan models.Signal
+	Trader   *PaperTrader
 }
 
 func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trader *PaperTrader) *EngineManager {
 	mgr := &EngineManager{
-		Buffers:         make(map[string]*PriceBuffer),
-		Strategy:        strategy,
-		Signals:         make(chan models.Signal, 100),
-		lastSignalType:  make(map[string]string),
-		lastSignalTime:  make(map[string]time.Time),
-		currentCandles:  make(map[string]*models.Candle),
-		Trader:          trader,
+		states:   make(map[string]*symbolState),
+		Strategy: strategy,
+		Signals:  make(chan models.Signal, 100),
+		Trader:   trader,
 	}
 	
 	for _, s := range symbols {
-		mgr.Buffers[s] = NewPriceBuffer(bufferSize)
+		mgr.states[s] = &symbolState{
+			buffer: NewPriceBuffer(bufferSize),
+		}
 	}
 	return mgr
 }
@@ -42,32 +45,32 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 		return fmt.Errorf("conversion error for %s: %w", tick.Symbol, err)
 	}
 
-	m.Lock()
-	defer m.Unlock()
-
-	// Update PaperTrader with every tick for precise benchmarking
-	if m.Trader != nil {
-		m.Trader.UpdateMetrics(tick.Symbol, point.Price)
-	}
-
-	buffer, exists := m.Buffers[tick.Symbol]
+	state, exists := m.states[tick.Symbol]
 	if !exists {
 		return fmt.Errorf("received data for untracked symbol: %s", tick.Symbol)
 	}
 
+	// Update PaperTrader with every tick for precise benchmarking
+	if m.Trader != nil {
+		m.Trader.UpdateMetrics(tick.Symbol, point.Price, point.Timestamp)
+	}
+
+	state.Lock()
+	defer state.Unlock()
+
 	// OHLCV Smoothing (1-minute candles)
-	curr := m.currentCandles[tick.Symbol]
+	curr := state.currentCandle
 	tickTime := point.Timestamp.Truncate(time.Minute)
 
 	if curr == nil || tickTime.After(curr.Time) {
 		// New minute started: Close old candle and process it
 		if curr != nil {
-			buffer.Add(curr.Close)
-			m.analyzeInternal(tick.Symbol, buffer)
+			state.buffer.Add(curr.Close)
+			m.analyzeInternal(tick.Symbol, state)
 		}
 
 		// Initialize new candle
-		m.currentCandles[tick.Symbol] = &models.Candle{
+		state.currentCandle = &models.Candle{
 			Symbol: tick.Symbol,
 			Open:   point.Price,
 			High:   point.Price,
@@ -89,15 +92,12 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	return nil
 }
 
-func (m *EngineManager) analyzeInternal(symbol string, buffer *PriceBuffer) {
-	history := buffer.GetHistory()
+func (m *EngineManager) analyzeInternal(symbol string, state *symbolState) {
+	history := state.buffer.GetHistory()
 	if signal := m.Strategy.Analyze(symbol, history); signal != nil {
-		lastType := m.lastSignalType[symbol]
-		lastTime := m.lastSignalTime[symbol]
-
-		if signal.Direction != lastType || time.Since(lastTime) > 5*time.Minute {
-			m.lastSignalType[symbol] = signal.Direction
-			m.lastSignalTime[symbol] = time.Now()
+		if signal.Direction != state.lastSignalType || time.Since(state.lastSignalTime) > 5*time.Minute {
+			state.lastSignalType = signal.Direction
+			state.lastSignalTime = time.Now()
 			m.Signals <- *signal
 		}
 	}
