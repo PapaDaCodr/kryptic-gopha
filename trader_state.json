@@ -1,22 +1,85 @@
 {
   "active_trades": {
-    "BNBUSDT": [
+    "BTCUSDT": [
       {
-        "symbol": "BNBUSDT",
-        "entry_price": "652.15",
+        "symbol": "BTCUSDT",
+        "entry_price": "70465.69",
         "direction": "SELL",
-        "time": "2026-03-12T11:34:23.347108336Z",
+        "time": "2026-03-12T12:24:00.501863179Z",
         "exits": {
-          "1": "652.69"
+          "1": "70397.28"
+        },
+        "status": "ACTIVE",
+        "exit_price": "0"
+      }
+    ],
+    "ETHUSDT": [
+      {
+        "symbol": "ETHUSDT",
+        "entry_price": "2064.37",
+        "direction": "SELL",
+        "time": "2026-03-12T12:23:00.556490982Z",
+        "exits": {
+          "1": "2065.27",
+          "5": "2064.02"
         },
         "status": "ACTIVE",
         "exit_price": "0"
       }
     ]
   },
-  "completed": [],
-  "total_wins": 0,
-  "total_losses": 0,
+  "completed": [
+    {
+      "symbol": "BNBUSDT",
+      "entry_price": "652.15",
+      "direction": "SELL",
+      "time": "2026-03-12T11:34:23.347108336Z",
+      "exits": {
+        "1": "652.69",
+        "10": "653.63",
+        "5": "653.08"
+      },
+      "status": "LOSS",
+      "exit_price": "653.63"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "entry_price": "2068.81",
+      "direction": "BUY",
+      "time": "2026-03-12T11:51:00.340962136Z",
+      "exits": {},
+      "status": "LOSS",
+      "exit_price": "2062.59"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "entry_price": "70475.71",
+      "direction": "BUY",
+      "time": "2026-03-12T11:52:01.259253258Z",
+      "exits": {
+        "1": "70500.37",
+        "10": "70392.31",
+        "5": "70441.46"
+      },
+      "status": "LOSS",
+      "exit_price": "70392.31"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "entry_price": "652.05",
+      "direction": "BUY",
+      "time": "2026-03-12T11:52:00.726223524Z",
+      "exits": {
+        "1": "652.33",
+        "10": "652.27",
+        "5": "652.23"
+      },
+      "status": "WIN",
+      "exit_price": "652.27"
+    }
+  ],
+  "total_wins": 1,
+  "total_losses": 3,
   "tp": "0.005",
   "sl": "0.003"
 }

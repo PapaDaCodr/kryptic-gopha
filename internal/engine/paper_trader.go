@@ -2,11 +2,13 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/papadacodr/kryptic-gopha/internal/models"
+	"github.com/papadacodr/kryptic-gopha/pkg/notifier"
 	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
 )
@@ -43,6 +45,9 @@ type PaperTrader struct {
 	TradingEnabled bool              `json:"trading_enabled"`
 	LastDailyReset time.Time         `json:"last_daily_reset"`
 	DailyPnL       decimal.Decimal   `json:"daily_pnl"`
+
+	// External services
+	Notifier notifier.Notifier `json:"-"`
 }
 
 func NewPaperTrader(balance float64) *PaperTrader {
@@ -107,6 +112,11 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		Str("price", sig.Price.String()).
 		Str("quantity", quantity.StringFixed(4)).
 		Msg("New trade opened")
+
+	if p.Notifier != nil {
+		p.Notifier.Notify(fmt.Sprintf("🚀 *NEW TRADE*\nSymbol: `%s`\nDirection: %s\nPrice: %s\nQty: %s",
+			sig.Symbol, sig.Direction, sig.Price.String(), quantity.StringFixed(4)))
+	}
 }
 
 func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal, now time.Time) {
@@ -203,6 +213,15 @@ func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin b
 		Str("result", t.Status).
 		Msg("Trade closed")
 
+	if p.Notifier != nil {
+		emoji := "❌"
+		if t.Status == "WIN" {
+			emoji = "✅"
+		}
+		p.Notifier.Notify(fmt.Sprintf("%s *TRADE CLOSED*\nSymbol: `%s`\nDirection: %s\nEntry: %s → Exit: %s\nPnL: `%s`\nResult: *%s*",
+			emoji, t.Symbol, t.Direction, t.EntryPrice.String(), currentPrice.String(), pnl.StringFixed(2), t.Status))
+	}
+
 	// Check Circuit Breaker
 	lossLimit := p.InitialBalance.Mul(p.DailyLossLimit).Neg()
 	if p.DailyPnL.LessThanOrEqual(lossLimit) {
@@ -211,6 +230,11 @@ func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin b
 			Str("daily_pnl", p.DailyPnL.StringFixed(2)).
 			Str("limit", lossLimit.StringFixed(2)).
 			Msg("CIRCUIT BREAKER TRIGGERED: Daily loss limit hit. Trading suspended.")
+
+		if p.Notifier != nil {
+			p.Notifier.Notify(fmt.Sprintf("🛑 *CIRCUIT BREAKER TRIGGERED*\nDaily PnL: `%s`\nLimit: `%s`\nTrading has been *SUSPENDED*",
+				p.DailyPnL.StringFixed(2), lossLimit.StringFixed(2)))
+		}
 	}
 	
 	p.Completed = append(p.Completed, *t)
