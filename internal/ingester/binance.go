@@ -120,7 +120,5 @@ func processMarketData(message []byte, mgr *engine.EngineManager) {
 	if err := mgr.UpdatePrice(payload.Data); err != nil {
 		log.Printf("Failed to update price for %s: %v", payload.Data.Symbol, err)
 	}
-
-	log.Printf("[%s] Price: $%s", payload.Data.Symbol, payload.Data.Price)
 }
 

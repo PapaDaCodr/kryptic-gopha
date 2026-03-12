@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+	"time"
 	"github.com/papadacodr/kryptic-gopha/internal/engine"
 	"github.com/papadacodr/kryptic-gopha/internal/ingester"
 )
@@ -8,8 +10,34 @@ import (
 func main() {
 	watchlist := []string{"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "FLOWUSDT"}
 	
-	// Initialize engine with buffer size 100 per symbol
-	mgr := engine.NewEngineManager(watchlist, 100)
+	strategy := &engine.MultiFactorStrategy{
+		ShortPeriod: 12,
+		LongPeriod:  26,
+		RSIPeriod:   14,
+	}
+
+	trader := engine.NewPaperTrader()
+	mgr := engine.NewEngineManager(watchlist, 500, strategy, trader)
 	
+	// Signal Listener
+	go func() {
+		for signal := range mgr.Signals {
+			log.Printf("\n--- [SIGNAL] %s ---\nAction: %s\nPrice: %f\nReason: %s\nConfidence: %.2f\n-------------------\n",
+				signal.Symbol, signal.Direction, signal.Price, signal.Reason, signal.Confidence)
+			
+			// Notify trader to track this virtual trade
+			trader.OnSignal(signal)
+		}
+	}()
+
+	// Accuracy Reporter Ticker
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		for range ticker.C {
+			log.Printf("\n==== ACCURACY REPORT ====\nTotal Signals: %d\nWin Rate: %.2f%%\n=========================\n",
+				trader.TotalWins+trader.TotalLosses, trader.GetWinRate())
+		}
+	}()
+
 	ingester.StartBinanceStream(watchlist, mgr)
 }
