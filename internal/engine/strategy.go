@@ -85,10 +85,12 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []float64) 
 
 	currentPrice := prices[len(prices)-1]
 
+	// Handle Initialization
 	if _, ok := s.lastEMA[symbol]; !ok {
 		s.lastEMA[symbol] = make(map[int]float64)
 		s.lastEMA[symbol][s.ShortPeriod] = calculateEMA(prices[:len(prices)-1], s.ShortPeriod)
 		s.lastEMA[symbol][s.LongPeriod] = calculateEMA(prices[:len(prices)-1], s.LongPeriod)
+		s.initRSI(symbol, prices[:len(prices)-1])
 	}
 
 	shortEMA := updateEMA(s.lastEMA[symbol][s.ShortPeriod], currentPrice, s.ShortPeriod)
@@ -134,33 +136,54 @@ func updateEMA(prevEMA, currentPrice float64, period int) float64 {
 	return (currentPrice-prevEMA)*multiplier + prevEMA
 }
 
-func (s *EfficientMultiFactorStrategy) calculateIncrementalRSI(symbol string, prices []float64) float64 {
-	currIdx := len(prices) - 1
-	prevIdx := len(prices) - 2
-	change := prices[currIdx] - prices[prevIdx]
-	
-	gain := 0.0
-	loss := 0.0
-	if change > 0 {
-		gain = change
-	} else {
-		loss = -change
+func (s *EfficientMultiFactorStrategy) initRSI(symbol string, prices []float64) {
+	if len(prices) < s.RSIPeriod+1 {
+		return
 	}
 
-	if !s.initialized[symbol] {
-		var initialGain, initialLoss float64
-		for i := 1; i <= s.RSIPeriod; i++ {
-			c := prices[i] - prices[i-1]
-			if c > 0 {
-				initialGain += c
-			} else {
-				initialLoss -= c
-			}
+	var totalGain, totalLoss float64
+	for i := 1; i <= s.RSIPeriod; i++ {
+		change := prices[i] - prices[i-1]
+		if change > 0 {
+			totalGain += change
+		} else {
+			totalLoss -= change
 		}
-		s.lastAvgGain[symbol] = initialGain / float64(s.RSIPeriod)
-		s.lastAvgLoss[symbol] = initialLoss / float64(s.RSIPeriod)
-		s.initialized[symbol] = true
+	}
+
+	s.lastAvgGain[symbol] = totalGain / float64(s.RSIPeriod)
+	s.lastAvgLoss[symbol] = totalLoss / float64(s.RSIPeriod)
+
+	// Process remaining prices to catch up state
+	for i := s.RSIPeriod + 1; i < len(prices); i++ {
+		change := prices[i] - prices[i-1]
+		gain, loss := 0.0, 0.0
+		if change > 0 {
+			gain = change
+		} else {
+			loss = -change
+		}
+		s.lastAvgGain[symbol] = (s.lastAvgGain[symbol]*float64(s.RSIPeriod-1) + gain) / float64(s.RSIPeriod)
+		s.lastAvgLoss[symbol] = (s.lastAvgLoss[symbol]*float64(s.RSIPeriod-1) + loss) / float64(s.RSIPeriod)
+	}
+	s.initialized[symbol] = true
+}
+
+func (s *EfficientMultiFactorStrategy) calculateIncrementalRSI(symbol string, prices []float64) float64 {
+	if !s.initialized[symbol] {
+		s.initRSI(symbol, prices)
 	} else {
+		currIdx := len(prices) - 1
+		prevIdx := len(prices) - 2
+		change := prices[currIdx] - prices[prevIdx]
+		
+		gain, loss := 0.0, 0.0
+		if change > 0 {
+			gain = change
+		} else {
+			loss = -change
+		}
+
 		s.lastAvgGain[symbol] = (s.lastAvgGain[symbol]*float64(s.RSIPeriod-1) + gain) / float64(s.RSIPeriod)
 		s.lastAvgLoss[symbol] = (s.lastAvgLoss[symbol]*float64(s.RSIPeriod-1) + loss) / float64(s.RSIPeriod)
 	}
@@ -175,12 +198,8 @@ func (s *EfficientMultiFactorStrategy) calculateIncrementalRSI(symbol string, pr
 
 
 func calculateEMA(prices []float64, period int) float64 {
-	length := len(prices)
-	if length == 0 {
+	if len(prices) == 0 {
 		return 0
-	}
-	if length > period {
-		prices = prices[length-period:]
 	}
 	
 	multiplier := 2.0 / (float64(period) + 1.0)
@@ -194,23 +213,39 @@ func calculateEMA(prices []float64, period int) float64 {
 
 func calculateRSI(prices []float64, period int) float64 {
 	if len(prices) <= period {
-		return 50 // Neutral
+		return 50
 	}
 
-	var gains, losses float64
+	var totalGain, totalLoss float64
 	for i := 1; i <= period; i++ {
-		change := prices[len(prices)-i] - prices[len(prices)-i-1]
+		change := prices[i] - prices[i-1]
 		if change > 0 {
-			gains += change
+			totalGain += change
 		} else {
-			losses -= change
+			totalLoss -= change
 		}
 	}
 
-	avgGain := gains / float64(period)
-	avgLoss := losses / float64(period)
+	avgGain := totalGain / float64(period)
+	avgLoss := totalLoss / float64(period)
+
+	for i := period + 1; i < len(prices); i++ {
+		change := prices[i] - prices[i-1]
+		gain, loss := 0.0, 0.0
+		if change > 0 {
+			gain = change
+		} else {
+			loss = -change
+		}
+		// Wilder's Smoothing: (PrevAvg * (N-1) + CurrentValue) / N
+		avgGain = (avgGain*float64(period-1) + gain) / float64(period)
+		avgLoss = (avgLoss*float64(period-1) + loss) / float64(period)
+	}
 
 	if avgLoss == 0 {
+		if avgGain == 0 {
+			return 50
+		}
 		return 100
 	}
 
