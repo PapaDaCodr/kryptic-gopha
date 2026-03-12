@@ -1,39 +1,42 @@
 package engine
 
 import (
-	"fmt"
+	"encoding/json"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/papadacodr/kryptic-gopha/internal/models"
+	"github.com/rs/zerolog/log"
+	"github.com/shopspring/decimal"
 )
 
 type Trade struct {
-	Symbol     string
-	EntryPrice float64
-	Direction  string
-	Time       time.Time
-	Exits      map[int]float64 // minute -> price
-	Status     string          // "ACTIVE", "WIN", "LOSS"
-	ExitPrice  float64
+	Symbol     string                  `json:"symbol"`
+	EntryPrice decimal.Decimal         `json:"entry_price"`
+	Direction  string                  `json:"direction"`
+	Time       time.Time               `json:"time"`
+	Exits      map[int]decimal.Decimal `json:"exits"`
+	Status     string                  `json:"status"`
+	ExitPrice  decimal.Decimal         `json:"exit_price"`
 }
 
 type PaperTrader struct {
 	sync.Mutex
-	ActiveTrades []Trade
-	Completed    []Trade
-	TotalWins    int
-	TotalLosses  int
-	TP           float64 // Take Profit Percentage (e.g. 0.01 for 1%)
-	SL           float64 // Stop Loss Percentage (e.g. 0.005 for 0.5%)
+	ActiveTrades map[string][]*Trade `json:"active_trades"`
+	Completed    []Trade             `json:"completed"`
+	TotalWins    int                 `json:"total_wins"`
+	TotalLosses  int                 `json:"total_losses"`
+	TP           decimal.Decimal     `json:"tp"`
+	SL           decimal.Decimal     `json:"sl"`
 }
 
 func NewPaperTrader() *PaperTrader {
 	return &PaperTrader{
-		ActiveTrades: make([]Trade, 0),
+		ActiveTrades: make(map[string][]*Trade),
 		Completed:    make([]Trade, 0),
-		TP:           0.005, // 0.5% default take profit
-		SL:           0.003, // 0.3% default stop loss
+		TP:           decimal.NewFromFloat(0.005),
+		SL:           decimal.NewFromFloat(0.003),
 	}
 }
 
@@ -41,93 +44,118 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 	p.Lock()
 	defer p.Unlock()
 
-	trade := Trade{
+	trade := &Trade{
 		Symbol:     sig.Symbol,
 		EntryPrice: sig.Price,
 		Direction:  sig.Direction,
 		Time:       sig.Timestamp,
-		Exits:      make(map[int]float64),
+		Exits:      make(map[int]decimal.Decimal),
 		Status:     "ACTIVE",
 	}
-	p.ActiveTrades = append(p.ActiveTrades, trade)
+	p.ActiveTrades[sig.Symbol] = append(p.ActiveTrades[sig.Symbol], trade)
+	
+	log.Info().
+		Str("symbol", sig.Symbol).
+		Str("direction", sig.Direction).
+		Str("price", sig.Price.String()).
+		Msg("New trade opened")
 }
 
-func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice float64, now time.Time) {
+func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal, now time.Time) {
 	p.Lock()
 	defer p.Unlock()
 
-	for i := 0; i < len(p.ActiveTrades); i++ {
-		t := &p.ActiveTrades[i]
-		if t.Symbol != symbol {
-			continue
-		}
+	trades, ok := p.ActiveTrades[symbol]
+	if !ok {
+		return
+	}
 
+	remainingTrades := make([]*Trade, 0, len(trades))
+
+	for _, t := range trades {
 		isWin := false
 		isLoss := false
 
 		if t.Direction == "BUY" {
-			if currentPrice >= t.EntryPrice*(1+p.TP) {
+			if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(decimal.NewFromInt(1).Add(p.TP))) {
 				isWin = true
-			} else if currentPrice <= t.EntryPrice*(1-p.SL) {
+			} else if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(decimal.NewFromInt(1).Sub(p.SL))) {
 				isLoss = true
 			}
 		} else {
-			if currentPrice <= t.EntryPrice*(1-p.TP) {
+			if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(decimal.NewFromInt(1).Sub(p.TP))) {
 				isWin = true
-			} else if currentPrice >= t.EntryPrice*(1+p.SL) {
+			} else if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(decimal.NewFromInt(1).Add(p.SL))) {
 				isLoss = true
 			}
 		}
 
 		if isWin || isLoss {
-			t.Status = map[bool]string{true: "WIN", false: "LOSS"}[isWin]
-			t.ExitPrice = currentPrice
+			t.Status = "LOSS"
 			if isWin {
+				t.Status = "WIN"
 				p.TotalWins++
 			} else {
 				p.TotalLosses++
 			}
-			fmt.Printf("\n[TARGET HIT] %s %s | Entry: %.2f | Exit: %.2f | Result: %s\n", 
-				t.Symbol, t.Direction, t.EntryPrice, currentPrice, t.Status)
+			t.ExitPrice = currentPrice
+			
+			log.Info().
+				Str("symbol", t.Symbol).
+				Str("direction", t.Direction).
+				Str("entry", t.EntryPrice.String()).
+				Str("exit", currentPrice.String()).
+				Str("result", t.Status).
+				Msg("Target hit")
 			
 			p.Completed = append(p.Completed, *t)
-			p.ActiveTrades = append(p.ActiveTrades[:i], p.ActiveTrades[i+1:]...)
-			i--
 			continue
 		}
 
 		duration := now.Sub(t.Time).Minutes()
-		
 		checkIntervals := []int{1, 5, 10}
 		for _, interval := range checkIntervals {
-			if duration >= float64(interval) && t.Exits[interval] == 0 {
+			if duration >= float64(interval) && (t.Exits[interval].IsZero()) {
 				t.Exits[interval] = currentPrice
 			}
 		}
 
-		if t.Exits[10] != 0 {
+		if !t.Exits[10].IsZero() {
 			isWinAt10 := false
-			if t.Direction == "BUY" && currentPrice > t.EntryPrice {
+			if t.Direction == "BUY" && currentPrice.GreaterThan(t.EntryPrice) {
 				isWinAt10 = true
-			} else if t.Direction == "SELL" && currentPrice < t.EntryPrice {
+			} else if t.Direction == "SELL" && currentPrice.LessThan(t.EntryPrice) {
 				isWinAt10 = true
 			}
 
-			t.Status = map[bool]string{true: "WIN", false: "LOSS"}[isWinAt10]
-			t.ExitPrice = currentPrice
+			t.Status = "LOSS"
 			if isWinAt10 {
+				t.Status = "WIN"
 				p.TotalWins++
 			} else {
 				p.TotalLosses++
 			}
+			t.ExitPrice = currentPrice
 			
-			fmt.Printf("\n[TIME EXIT] %s %s | Entry: %.2f | Exit: %.2f | Result: %s\n", 
-				t.Symbol, t.Direction, t.EntryPrice, currentPrice, t.Status)
+			log.Info().
+				Str("symbol", t.Symbol).
+				Str("direction", t.Direction).
+				Str("entry", t.EntryPrice.String()).
+				Str("exit", currentPrice.String()).
+				Str("result", t.Status).
+				Msg("Time exit")
 
 			p.Completed = append(p.Completed, *t)
-			p.ActiveTrades = append(p.ActiveTrades[:i], p.ActiveTrades[i+1:]...)
-			i--
+			continue
 		}
+
+		remainingTrades = append(remainingTrades, t)
+	}
+
+	if len(remainingTrades) == 0 {
+		delete(p.ActiveTrades, symbol)
+	} else {
+		p.ActiveTrades[symbol] = remainingTrades
 	}
 }
 
@@ -140,4 +168,26 @@ func (p *PaperTrader) GetWinRate() float64 {
 		return 0
 	}
 	return float64(p.TotalWins) / float64(total) * 100
+}
+
+func (p *PaperTrader) SaveState(filename string) error {
+	p.Lock()
+	defer p.Unlock()
+
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filename, data, 0644)
+}
+
+func (p *PaperTrader) LoadState(filename string) error {
+	p.Lock()
+	defer p.Unlock()
+
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, p)
 }

@@ -4,21 +4,22 @@ import (
 	"fmt"
 	"time"
 	"github.com/papadacodr/kryptic-gopha/internal/models"
+	"github.com/shopspring/decimal"
 )
 
 // Strategy defines the interface for trading algorithms
 type Strategy interface {
-	Analyze(symbol string, prices []float64) *models.Signal
+	Analyze(symbol string, prices []decimal.Decimal) *models.Signal
 }
 
 // EMAStrategy is a basic but effective trend-following strategy
 type EMAStrategy struct {
 	ShortPeriod int
 	LongPeriod  int
-	Threshold   float64
+	Threshold   decimal.Decimal
 }
 
-func (s *EMAStrategy) Analyze(symbol string, prices []float64) *models.Signal {
+func (s *EMAStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.Signal {
 	if len(prices) < s.LongPeriod {
 		return nil
 	}
@@ -26,20 +27,22 @@ func (s *EMAStrategy) Analyze(symbol string, prices []float64) *models.Signal {
 	shortEMA := calculateEMA(prices, s.ShortPeriod)
 	longEMA := calculateEMA(prices, s.LongPeriod)
 
-	// Bullish Crossover
-	if shortEMA > longEMA*(1+s.Threshold) {
+	// Bullish Crossover: shortEMA > longEMA*(1+s.Threshold)
+	thresholdMultiplier := decimal.NewFromInt(1).Add(s.Threshold)
+	if shortEMA.GreaterThan(longEMA.Mul(thresholdMultiplier)) {
 		return &models.Signal{
 			Symbol:     symbol,
 			Price:      prices[len(prices)-1],
 			Direction:  "BUY",
 			Reason:     "EMA Bullish Crossover",
-			Confidence: 0.75, // Simplified
+			Confidence: 0.75,
 			Timestamp:  time.Now(),
 		}
 	}
 
-	// Bearish Crossover
-	if shortEMA < longEMA*(1-s.Threshold) {
+	// Bearish Crossover: shortEMA < longEMA*(1-s.Threshold)
+	thresholdMultiplierSell := decimal.NewFromInt(1).Sub(s.Threshold)
+	if shortEMA.LessThan(longEMA.Mul(thresholdMultiplierSell)) {
 		return &models.Signal{
 			Symbol:     symbol,
 			Price:      prices[len(prices)-1],
@@ -60,9 +63,9 @@ type EfficientMultiFactorStrategy struct {
 	RSIPeriod   int
 	
 	// State per symbol
-	lastEMA     map[string]map[int]float64 // symbol -> period -> value
-	lastAvgGain map[string]float64
-	lastAvgLoss map[string]float64
+	lastEMA     map[string]map[int]decimal.Decimal // symbol -> period -> value
+	lastAvgGain map[string]decimal.Decimal
+	lastAvgLoss map[string]decimal.Decimal
 	initialized map[string]bool
 }
 
@@ -71,14 +74,14 @@ func NewEfficientStrategy(short, long, rsi int) *EfficientMultiFactorStrategy {
 		ShortPeriod: short,
 		LongPeriod:  long,
 		RSIPeriod:   rsi,
-		lastEMA:     make(map[string]map[int]float64),
-		lastAvgGain: make(map[string]float64),
-		lastAvgLoss: make(map[string]float64),
+		lastEMA:     make(map[string]map[int]decimal.Decimal),
+		lastAvgGain: make(map[string]decimal.Decimal),
+		lastAvgLoss: make(map[string]decimal.Decimal),
 		initialized: make(map[string]bool),
 	}
 }
 
-func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []float64) *models.Signal {
+func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.Signal {
 	if len(prices) < s.LongPeriod || len(prices) < s.RSIPeriod+1 {
 		return nil
 	}
@@ -87,7 +90,7 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []float64) 
 
 	// Handle Initialization
 	if _, ok := s.lastEMA[symbol]; !ok {
-		s.lastEMA[symbol] = make(map[int]float64)
+		s.lastEMA[symbol] = make(map[int]decimal.Decimal)
 		s.lastEMA[symbol][s.ShortPeriod] = calculateEMA(prices[:len(prices)-1], s.ShortPeriod)
 		s.lastEMA[symbol][s.LongPeriod] = calculateEMA(prices[:len(prices)-1], s.LongPeriod)
 		s.initRSI(symbol, prices[:len(prices)-1])
@@ -100,29 +103,30 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []float64) 
 	s.lastEMA[symbol][s.LongPeriod] = longEMA
 
 	rsi := s.calculateIncrementalRSI(symbol, prices)
+	rsiFloat, _ := rsi.Float64()
 	
 	confidence := 0.5 + (0.4 * (func(v float64) float64 {
 		if v > 50 { return (v - 50) / 50 }
 		return (50 - v) / 50
-	}(rsi)))
+	}(rsiFloat)))
 
-	if shortEMA > longEMA && rsi < 40 {
+	if shortEMA.GreaterThan(longEMA) && rsiFloat < 40 {
 		return &models.Signal{
 			Symbol:     symbol,
 			Price:      currentPrice,
 			Direction:  "BUY",
-			Reason:     fmt.Sprintf("Trend:UP | RSI:%.2f", rsi),
+			Reason:     fmt.Sprintf("Trend:UP | RSI:%.2f", rsiFloat),
 			Confidence: confidence,
 			Timestamp:  time.Now(),
 		}
 	}
 
-	if shortEMA < longEMA && rsi > 60 {
+	if shortEMA.LessThan(longEMA) && rsiFloat > 60 {
 		return &models.Signal{
 			Symbol:     symbol,
 			Price:      currentPrice,
 			Direction:  "SELL",
-			Reason:     fmt.Sprintf("Trend:DOWN | RSI:%.2f", rsi),
+			Reason:     fmt.Sprintf("Trend:DOWN | RSI:%.2f", rsiFloat),
 			Confidence: confidence,
 			Timestamp:  time.Now(),
 		}
@@ -131,125 +135,135 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []float64) 
 	return nil
 }
 
-func updateEMA(prevEMA, currentPrice float64, period int) float64 {
-	multiplier := 2.0 / (float64(period) + 1.0)
-	return (currentPrice-prevEMA)*multiplier + prevEMA
+func updateEMA(prevEMA, currentPrice decimal.Decimal, period int) decimal.Decimal {
+	multiplier := decimal.NewFromFloat(2.0 / (float64(period) + 1.0))
+	return currentPrice.Sub(prevEMA).Mul(multiplier).Add(prevEMA)
 }
 
-func (s *EfficientMultiFactorStrategy) initRSI(symbol string, prices []float64) {
+func (s *EfficientMultiFactorStrategy) initRSI(symbol string, prices []decimal.Decimal) {
 	if len(prices) < s.RSIPeriod+1 {
 		return
 	}
 
-	var totalGain, totalLoss float64
+	totalGain := decimal.Zero
+	totalLoss := decimal.Zero
 	for i := 1; i <= s.RSIPeriod; i++ {
-		change := prices[i] - prices[i-1]
-		if change > 0 {
-			totalGain += change
+		change := prices[i].Sub(prices[i-1])
+		if change.IsPositive() {
+			totalGain = totalGain.Add(change)
 		} else {
-			totalLoss -= change
+			totalLoss = totalLoss.Sub(change)
 		}
 	}
 
-	s.lastAvgGain[symbol] = totalGain / float64(s.RSIPeriod)
-	s.lastAvgLoss[symbol] = totalLoss / float64(s.RSIPeriod)
+	s.lastAvgGain[symbol] = totalGain.Div(decimal.NewFromInt(int64(s.RSIPeriod)))
+	s.lastAvgLoss[symbol] = totalLoss.Div(decimal.NewFromInt(int64(s.RSIPeriod)))
 
 	// Process remaining prices to catch up state
+	rsiPeriodDec := decimal.NewFromInt(int64(s.RSIPeriod))
+	rsiMinusOneDec := decimal.NewFromInt(int64(s.RSIPeriod - 1))
+
 	for i := s.RSIPeriod + 1; i < len(prices); i++ {
-		change := prices[i] - prices[i-1]
-		gain, loss := 0.0, 0.0
-		if change > 0 {
+		change := prices[i].Sub(prices[i-1])
+		gain, loss := decimal.Zero, decimal.Zero
+		if change.IsPositive() {
 			gain = change
 		} else {
-			loss = -change
+			loss = change.Neg()
 		}
-		s.lastAvgGain[symbol] = (s.lastAvgGain[symbol]*float64(s.RSIPeriod-1) + gain) / float64(s.RSIPeriod)
-		s.lastAvgLoss[symbol] = (s.lastAvgLoss[symbol]*float64(s.RSIPeriod-1) + loss) / float64(s.RSIPeriod)
+		s.lastAvgGain[symbol] = s.lastAvgGain[symbol].Mul(rsiMinusOneDec).Add(gain).Div(rsiPeriodDec)
+		s.lastAvgLoss[symbol] = s.lastAvgLoss[symbol].Mul(rsiMinusOneDec).Add(loss).Div(rsiPeriodDec)
 	}
 	s.initialized[symbol] = true
 }
 
-func (s *EfficientMultiFactorStrategy) calculateIncrementalRSI(symbol string, prices []float64) float64 {
+func (s *EfficientMultiFactorStrategy) calculateIncrementalRSI(symbol string, prices []decimal.Decimal) decimal.Decimal {
+	rsiPeriodDec := decimal.NewFromInt(int64(s.RSIPeriod))
+	rsiMinusOneDec := decimal.NewFromInt(int64(s.RSIPeriod - 1))
+
 	if !s.initialized[symbol] {
 		s.initRSI(symbol, prices)
 	} else {
 		currIdx := len(prices) - 1
 		prevIdx := len(prices) - 2
-		change := prices[currIdx] - prices[prevIdx]
+		change := prices[currIdx].Sub(prices[prevIdx])
 		
-		gain, loss := 0.0, 0.0
-		if change > 0 {
+		gain, loss := decimal.Zero, decimal.Zero
+		if change.IsPositive() {
 			gain = change
 		} else {
-			loss = -change
+			loss = change.Neg()
 		}
 
-		s.lastAvgGain[symbol] = (s.lastAvgGain[symbol]*float64(s.RSIPeriod-1) + gain) / float64(s.RSIPeriod)
-		s.lastAvgLoss[symbol] = (s.lastAvgLoss[symbol]*float64(s.RSIPeriod-1) + loss) / float64(s.RSIPeriod)
+		s.lastAvgGain[symbol] = s.lastAvgGain[symbol].Mul(rsiMinusOneDec).Add(gain).Div(rsiPeriodDec)
+		s.lastAvgLoss[symbol] = s.lastAvgLoss[symbol].Mul(rsiMinusOneDec).Add(loss).Div(rsiPeriodDec)
 	}
 
-	if s.lastAvgLoss[symbol] == 0 {
-		return 100
+	if s.lastAvgLoss[symbol].IsZero() {
+		return decimal.NewFromInt(100)
 	}
 
-	rs := s.lastAvgGain[symbol] / s.lastAvgLoss[symbol]
-	return 100 - (100 / (1 + rs))
+	rs := s.lastAvgGain[symbol].Div(s.lastAvgLoss[symbol])
+	// 100 - (100 / (1 + rs))
+	return decimal.NewFromInt(100).Sub(decimal.NewFromInt(100).Div(decimal.NewFromInt(1).Add(rs)))
 }
 
-
-func calculateEMA(prices []float64, period int) float64 {
+func calculateEMA(prices []decimal.Decimal, period int) decimal.Decimal {
 	if len(prices) == 0 {
-		return 0
+		return decimal.Zero
 	}
 	
-	multiplier := 2.0 / (float64(period) + 1.0)
+	multiplier := decimal.NewFromFloat(2.0 / (float64(period) + 1.0))
 	ema := prices[0]
 	
 	for i := 1; i < len(prices); i++ {
-		ema = (prices[i]-ema)*multiplier + ema
+		ema = prices[i].Sub(ema).Mul(multiplier).Add(ema)
 	}
 	return ema
 }
 
-func calculateRSI(prices []float64, period int) float64 {
+func calculateRSI(prices []decimal.Decimal, period int) decimal.Decimal {
 	if len(prices) <= period {
-		return 50
+		return decimal.NewFromInt(50)
 	}
 
-	var totalGain, totalLoss float64
+	totalGain := decimal.Zero
+	totalLoss := decimal.Zero
 	for i := 1; i <= period; i++ {
-		change := prices[i] - prices[i-1]
-		if change > 0 {
-			totalGain += change
+		change := prices[i].Sub(prices[i-1])
+		if change.IsPositive() {
+			totalGain = totalGain.Add(change)
 		} else {
-			totalLoss -= change
+			totalLoss = totalLoss.Sub(change)
 		}
 	}
 
-	avgGain := totalGain / float64(period)
-	avgLoss := totalLoss / float64(period)
+	avgGain := totalGain.Div(decimal.NewFromInt(int64(period)))
+	avgLoss := totalLoss.Div(decimal.NewFromInt(int64(period)))
+
+	periodDec := decimal.NewFromInt(int64(period))
+	periodMinusOneDec := decimal.NewFromInt(int64(period - 1))
 
 	for i := period + 1; i < len(prices); i++ {
-		change := prices[i] - prices[i-1]
-		gain, loss := 0.0, 0.0
-		if change > 0 {
+		change := prices[i].Sub(prices[i-1])
+		gain, loss := decimal.Zero, decimal.Zero
+		if change.IsPositive() {
 			gain = change
 		} else {
-			loss = -change
+			loss = change.Neg()
 		}
 		// Wilder's Smoothing: (PrevAvg * (N-1) + CurrentValue) / N
-		avgGain = (avgGain*float64(period-1) + gain) / float64(period)
-		avgLoss = (avgLoss*float64(period-1) + loss) / float64(period)
+		avgGain = avgGain.Mul(periodMinusOneDec).Add(gain).Div(periodDec)
+		avgLoss = avgLoss.Mul(periodMinusOneDec).Add(loss).Div(periodDec)
 	}
 
-	if avgLoss == 0 {
-		if avgGain == 0 {
-			return 50
+	if avgLoss.IsZero() {
+		if avgGain.IsZero() {
+			return decimal.NewFromInt(50)
 		}
-		return 100
+		return decimal.NewFromInt(100)
 	}
 
-	rs := avgGain / avgLoss
-	return 100 - (100 / (1 + rs))
+	rs := avgGain.Div(avgLoss)
+	return decimal.NewFromInt(100).Sub(decimal.NewFromInt(100).Div(decimal.NewFromInt(1).Add(rs)))
 }
-

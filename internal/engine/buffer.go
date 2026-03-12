@@ -2,11 +2,12 @@ package engine
 
 import (
 	"sync"
+	"github.com/shopspring/decimal"
 )
 
 type PriceBuffer struct {
 	mu     sync.Mutex
-	prices []float64
+	prices []decimal.Decimal
 	size   int
 	cursor int
 	isFull bool
@@ -14,12 +15,12 @@ type PriceBuffer struct {
 
 func NewPriceBuffer(size int) *PriceBuffer {
 	return &PriceBuffer{
-		prices: make([]float64, size),
+		prices: make([]decimal.Decimal, size),
 		size:   size,
 	}
 }
 
-func (b *PriceBuffer) Add(price float64) {
+func (b *PriceBuffer) Add(price decimal.Decimal) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -30,7 +31,7 @@ func (b *PriceBuffer) Add(price float64) {
 	}
 }
 
-func (b *PriceBuffer) GetHistory() []float64 {
+func (b *PriceBuffer) GetHistory() []decimal.Decimal {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -38,7 +39,7 @@ func (b *PriceBuffer) GetHistory() []float64 {
 		return b.prices[:b.cursor]
 	}
 
-	out := make([]float64, b.size)
+	out := make([]decimal.Decimal, b.size)
 	copy(out, b.prices[b.cursor:])
 	copy(out[b.size-b.cursor:], b.prices[:b.cursor])
 	return out
