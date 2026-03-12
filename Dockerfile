@@ -20,6 +20,7 @@ RUN go build -o bot ./cmd/server/main.go
 FROM alpine:latest
 
 WORKDIR /app
+RUN apk add --no-cache ca-certificates
 
 # Copy binary from builder
 COPY --from=builder /app/bot .

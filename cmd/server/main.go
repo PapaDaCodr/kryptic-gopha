@@ -1,20 +1,39 @@
 package main
 
 import (
-	"fmt"
-	"log"
+	"context"
+	"encoding/json"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/papadacodr/kryptic-gopha/internal/engine"
 	"github.com/papadacodr/kryptic-gopha/internal/ingester"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+	"github.com/shopspring/decimal"
 )
 
+const stateFile = "trader_state.json"
+
+func init() {
+	// Configure zerolog for production (JSON) or development (Console)
+	if os.Getenv("ENV") == "dev" {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+	}
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+}
+
 func main() {
-	// Configuration from Environment Variables
+	// 1. Setup Context & Shutdown Handling
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 2. Configuration from Environment Variables
 	watchStr := os.Getenv("WATCHLIST")
 	if watchStr == "" {
 		watchStr = "BTCUSDT,ETHUSDT,BNBUSDT"
@@ -28,49 +47,123 @@ func main() {
 	)
 
 	trader := engine.NewPaperTrader()
-	trader.TP = getEnvFloat("TP", 0.005)
-	trader.SL = getEnvFloat("SL", 0.003)
+	trader.TP = getEnvDecimal("TP", "0.005")
+	trader.SL = getEnvDecimal("SL", "0.003")
+
+	// 3. Load previous state if exists
+	if _, err := os.Stat(stateFile); err == nil {
+		if err := trader.LoadState(stateFile); err != nil {
+			log.Warn().Err(err).Msg("Failed to load state file")
+		} else {
+			log.Info().Msg("Previous state loaded successfully")
+		}
+	}
 
 	mgr := engine.NewEngineManager(watchlist, 500, strategy, trader)
 	
-	// Signal Listener
+	// 4. Warm-up Phase: Load historical data
+	log.Info().Int("count", len(watchlist)).Msg("Starting warm-up phase")
+	for _, symbol := range watchlist {
+		ticks, err := ingester.FetchHistoricalKlines(symbol, "1m", 100)
+		if err != nil {
+			log.Error().Err(err).Str("symbol", symbol).Msg("Warm-up fetch failed")
+			continue
+		}
+		for _, tick := range ticks {
+			if err := mgr.UpdatePrice(tick); err != nil {
+				log.Error().Err(err).Str("symbol", symbol).Msg("Warm-up processing failed")
+			}
+		}
+		log.Debug().Str("symbol", symbol).Int("ticks", len(ticks)).Msg("Warmed up symbol")
+	}
+
+	// 5. Signal Listener
 	go func() {
-		for signal := range mgr.Signals {
-			log.Printf("\n--- [SIGNAL] %s ---\nAction: %s\nPrice: %f\nReason: %s\nConfidence: %.2f\n-------------------\n",
-				signal.Symbol, signal.Direction, signal.Price, signal.Reason, signal.Confidence)
-			
-			trader.OnSignal(signal)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case signal := <-mgr.Signals:
+				log.Info().
+					Str("symbol", signal.Symbol).
+					Str("direction", signal.Direction).
+					Str("price", signal.Price.String()).
+					Float64("confidence", signal.Confidence).
+					Str("reason", signal.Reason).
+					Msg("Trading signal received")
+				trader.OnSignal(signal)
+			}
 		}
 	}()
 
-	// Accuracy Reporter Ticker
+	// 6. Persistence & Report Ticker
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		for range ticker.C {
-			log.Printf("\n==== ACCURACY REPORT ====\nTotal Signals: %d\nWin Rate: %.2f%%\nTP/SL: %.2f%%/%.2f%%\n=========================\n",
-				trader.TotalWins+trader.TotalLosses, trader.GetWinRate(), trader.TP*100, trader.SL*100)
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := trader.SaveState(stateFile); err != nil {
+					log.Error().Err(err).Msg("Failed to save state")
+				}
+				
+				log.Info().
+					Int("total_signals", trader.TotalWins+trader.TotalLosses).
+					Float64("win_rate", trader.GetWinRate()).
+					Msg("Periodic report")
+			}
 		}
 	}()
 
-	// Health Check Server
-	go func() {
-		port := os.Getenv("PORT")
-		if port == "" {
-			port = "8080"
-		}
-
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "Kryptic Gopha Bot is Running\nWatchlist: %v\nTotal Signals: %d\nWin Rate: %.2f%%", 
-				watchlist, trader.TotalWins+trader.TotalLosses, trader.GetWinRate())
+	// 7. Health Check Server (JSON API)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":        "OK",
+			"watchlist":     watchlist,
+			"total_signals": trader.TotalWins + trader.TotalLosses,
+			"win_rate":      trader.GetWinRate(),
+			"active_trades": len(trader.ActiveTrades),
 		})
+	})
 
-		log.Printf("Starting health check server on port %s", port)
-		if err := http.ListenAndServe(":"+port, nil); err != nil {
-			log.Printf("HTTP server failed: %v", err)
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: mux,
+	}
+
+	go func() {
+		log.Info().Str("port", port).Msg("Starting health server")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("HTTP server failed")
 		}
 	}()
 
-	ingester.StartBinanceStream(watchlist, mgr)
+	// 8. Start Ingestion
+	go ingester.StartBinanceStream(ctx, watchlist, mgr)
+
+	// Wait for termination
+	<-ctx.Done()
+	log.Info().Msg("Shutting down gracefully...")
+
+	// Save final state
+	if err := trader.SaveState(stateFile); err != nil {
+		log.Error().Err(err).Msg("Failed to save final state")
+	}
+
+	// Cleanup
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
+	
+	log.Info().Msg("Exit.")
 }
 
 func getEnvInt(key string, fallback int) int {
@@ -82,11 +175,12 @@ func getEnvInt(key string, fallback int) int {
 	return fallback
 }
 
-func getEnvFloat(key string, fallback float64) float64 {
+func getEnvDecimal(key string, fallback string) decimal.Decimal {
 	if val := os.Getenv(key); val != "" {
-		if f, err := strconv.ParseFloat(val, 64); err == nil {
-			return f
+		if d, err := decimal.NewFromString(val); err == nil {
+			return d
 		}
 	}
-	return fallback
+	d, _ := decimal.NewFromString(fallback)
+	return d
 }
