@@ -282,6 +282,17 @@ body {
 }
 
 /* Legend UI */
+.update-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+#val-last-update {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
 .btn-icon {
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid var(--border-color);

@@ -129,9 +129,16 @@ func (m *EngineManager) GetCandles(symbol string) []models.Candle {
 	state.Lock()
 	defer state.Unlock()
 
-	// Return a copy of history
-	res := make([]models.Candle, len(state.history))
+	// Return a copy of history + the current forming candle
+	total := len(state.history)
+	if state.currentCandle != nil {
+		total++
+	}
+	res := make([]models.Candle, total)
 	copy(res, state.history)
+	if state.currentCandle != nil {
+		res[len(state.history)] = *state.currentCandle
+	}
 	return res
 }
 // GetSignals returns the recent signal history for a symbol

@@ -243,7 +243,11 @@ async function loadChartData(symbol) {
             }))
             .sort((a, b) => a.time - b.time);
 
-        state.candleSeries.setData(chartData);
+        if (chartData.length > 0) {
+            // Set historical data once, then update the last candle
+            state.candleSeries.setData(chartData.slice(0, -1));
+            state.candleSeries.update(chartData[chartData.length - 1]);
+        }
 
         // 2. Fetch Model Predictions (Signals)
         const signalRes = await fetch(`/api/signals?symbol=${symbol}`);
@@ -266,6 +270,7 @@ async function loadChartData(symbol) {
 
         const currentPrice = chartData[chartData.length - 1].close;
         document.getElementById('chart-legend').textContent = `${symbol} • ${formatCurrency(currentPrice)}`;
+        document.getElementById('val-last-update').textContent = `Last Updated: ${new Date().toLocaleTimeString()}`;
 
     } catch (e) {
         console.error('Failed to load chart data:', e);

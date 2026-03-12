@@ -8,10 +8,10 @@ PORT=8080
 
 ## run: Kill existing process and run the server
 run: stop
-	@echo "🚀 Starting $(BINARY_NAME)..."
+	@echo "Starting $(BINARY_NAME)..."
 	@go run cmd/server/main.go > server.log 2>&1 &
-	@echo "✅ Server is running in background. Port: $(PORT)"
-	@echo "📜 Logs are being written to server.log"
+	@echo "Server is running in background. Port: $(PORT)"
+	@echo "Logs are being written to server.log"
 
 ## stop: Safely terminate the running bot
 stop:
