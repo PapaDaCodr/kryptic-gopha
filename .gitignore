@@ -18,6 +18,7 @@
 # Project Specific Data/Logs
 *.log
 data.csv
+trader_state.json
 /tmp/
 
 # IDE Metadata
@@ -28,7 +29,6 @@ data.csv
 
 # Go Specifics
 vendor/
-pkg/
 bin/
 *.test
 *.out

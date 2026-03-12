@@ -9,6 +9,7 @@ import (
 
 func TestStrategy_RSIAccuracy(t *testing.T) {
 	s := NewEfficientStrategy(2, 5, 3)
+	s.MacroPeriod = 5 // Override default 200 for this small test
 	symbol := "BTC"
 	priceVals := []string{"100", "102", "101", "105", "108", "107", "110", "112", "111"}
 	prices := make([]decimal.Decimal, len(priceVals))
@@ -35,6 +36,7 @@ func TestStrategy_RSIAccuracy(t *testing.T) {
 
 func TestEngineManager_OHLCV(t *testing.T) {
 	strategy := NewEfficientStrategy(2, 4, 2)
+	strategy.MacroPeriod = 4 // Override for test
 	mgr := NewEngineManager([]string{"BTC"}, 10, strategy, nil)
 	now := time.Now().Truncate(time.Minute)
 
@@ -63,7 +65,9 @@ func TestEngineManager_OHLCV(t *testing.T) {
 
 func TestEngineManager_Concurrency(t *testing.T) {
 	symbols := []string{"BTC", "ETH", "SOL", "BNB"}
-	mgr := NewEngineManager(symbols, 10, NewEfficientStrategy(2, 4, 2), nil)
+	strategy := NewEfficientStrategy(2, 4, 2)
+	strategy.MacroPeriod = 4
+	mgr := NewEngineManager(symbols, 10, strategy, nil)
 	
 	const iterations = 100
 	done := make(chan bool)
@@ -106,8 +110,9 @@ func TestPriceBuffer_Circular(t *testing.T) {
 }
 
 func TestStrategy_IncrementalAccuracy(t *testing.T) {
-	s := NewEfficientStrategy(2, 5, 3)
-	symbol := "BTC"
+	s := NewEfficientStrategy(2, 4, 3)
+	s.MacroPeriod = 4 // Override for small test
+	symbol := "ETH"
 	priceVals := []string{"100", "102", "101", "105", "104", "108", "107"}
 	prices := make([]decimal.Decimal, len(priceVals))
 	for i, v := range priceVals {
@@ -131,6 +136,7 @@ func TestStrategy_IncrementalAccuracy(t *testing.T) {
 
 func TestPaperTrader_TimeExit(t *testing.T) {
 	trader := NewPaperTrader(10000.0)
+	trader.TrailingSL = false // Disable trailing for this test
 	trader.TP = decimal.NewFromFloat(0.5) // High TP so it doesn't hit
 	trader.SL = decimal.NewFromFloat(0.5) // High SL so it doesn't hit
 	symbol := "BTC"
@@ -164,6 +170,7 @@ func TestPaperTrader_TimeExit(t *testing.T) {
 
 func TestEngineManager_UpdatePrice(t *testing.T) {
 	strategy := NewEfficientStrategy(2, 4, 2)
+	strategy.MacroPeriod = 4
 	trader := NewPaperTrader(10000.0)
 	symbols := []string{"BTCUSDT"}
 	mgr := NewEngineManager(symbols, 10, strategy, trader)
@@ -185,6 +192,7 @@ func TestEngineManager_UpdatePrice(t *testing.T) {
 
 func TestPaperTrader_StatusTransitions(t *testing.T) {
 	trader := NewPaperTrader(10000.0)
+	trader.TrailingSL = false // Disable trailing for this test
 	trader.TP = decimal.NewFromFloat(0.01) // 1%
 	trader.SL = decimal.NewFromFloat(0.01) // 1%
 	symbol := "ETHUSDT"
@@ -212,5 +220,43 @@ func TestPaperTrader_StatusTransitions(t *testing.T) {
 	trader.UpdateMetrics(symbol, decimal.NewFromInt(1020), now.Add(11 * time.Minute))
 	if trader.TotalLosses != 1 {
 		t.Errorf("Expected 1 loss, got %d", trader.TotalLosses)
+	}
+}
+
+func TestPaperTrader_TrailingSL(t *testing.T) {
+	trader := NewPaperTrader(10000.0)
+	trader.TP = decimal.NewFromFloat(0.10)  // 10% TP (won't hit in this test)
+	trader.TrailingSL = true
+	trader.TrailingSLPct = decimal.NewFromFloat(0.01) // 1% trailing distance
+	symbol := "BTC"
+	now := time.Now()
+
+	// Open a BUY at 1000
+	trader.OnSignal(models.Signal{
+		Symbol:    symbol,
+		Price:     decimal.NewFromInt(1000),
+		Direction: "BUY",
+		Timestamp: now,
+	})
+
+	// Price rises to 1050 (HWM updates to 1050)
+	trader.UpdateMetrics(symbol, decimal.NewFromInt(1050), now.Add(time.Minute))
+	if len(trader.ActiveTrades[symbol]) != 1 {
+		t.Fatal("Trade should still be active at 1050")
+	}
+
+	// Price drops to 1040 (1% trailing from 1050 = 1039.5, so 1040 is above -> still active)
+	trader.UpdateMetrics(symbol, decimal.NewFromInt(1040), now.Add(2*time.Minute))
+	if len(trader.ActiveTrades[symbol]) != 1 {
+		t.Fatal("Trade should still be active at 1040 (trail stop is 1039.5)")
+	}
+
+	// Price drops to 1039 (below 1039.5 trailing stop) -> should close as WIN (1039 > 1000 entry)
+	trader.UpdateMetrics(symbol, decimal.NewFromInt(1039), now.Add(3*time.Minute))
+	if len(trader.ActiveTrades[symbol]) != 0 {
+		t.Fatal("Trade should have been closed by trailing SL at 1039")
+	}
+	if trader.TotalWins != 1 {
+		t.Errorf("Expected 1 win (trailing SL above entry), got wins=%d losses=%d", trader.TotalWins, trader.TotalLosses)
 	}
 }

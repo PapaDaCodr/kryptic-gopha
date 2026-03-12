@@ -2,25 +2,29 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/papadacodr/kryptic-gopha/internal/models"
+	"github.com/papadacodr/kryptic-gopha/pkg/notifier"
 	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
 )
 
 type Trade struct {
-	Symbol     string                  `json:"symbol"`
-	EntryPrice decimal.Decimal         `json:"entry_price"`
-	Quantity   decimal.Decimal         `json:"quantity"`
-	Direction  string                  `json:"direction"`
-	Time       time.Time               `json:"time"`
-	Exits      map[int]decimal.Decimal `json:"exits"`
-	Status     string                  `json:"status"`
-	ExitPrice  decimal.Decimal         `json:"exit_price"`
-	PnL        decimal.Decimal         `json:"pnl"`
+	Symbol        string                  `json:"symbol"`
+	EntryPrice    decimal.Decimal         `json:"entry_price"`
+	Quantity      decimal.Decimal         `json:"quantity"`
+	Direction     string                  `json:"direction"`
+	Time          time.Time               `json:"time"`
+	Exits         map[int]decimal.Decimal `json:"exits"`
+	Status        string                  `json:"status"`
+	ExitPrice     decimal.Decimal         `json:"exit_price"`
+	PnL           decimal.Decimal         `json:"pnl"`
+	HighWaterMark decimal.Decimal         `json:"high_water_mark"` // Best price seen for trailing SL
+	ExitReason    string                  `json:"exit_reason"`
 }
 
 type PaperTrader struct {
@@ -31,18 +35,23 @@ type PaperTrader struct {
 	TotalLosses  int                 `json:"total_losses"`
 	
 	// Risk Management Settings
-	TP           decimal.Decimal     `json:"tp"`
-	SL           decimal.Decimal     `json:"sl"`
-	Balance      decimal.Decimal     `json:"balance"`       // Current wallet balance
-	InitialBalance decimal.Decimal   `json:"initial_balance"`
-	RiskPerTrade decimal.Decimal     `json:"risk_per_trade"` // % of balance to risk per trade (e.g., 0.01 for 1%)
-	MaxOpenTrades int                `json:"max_open_trades"`
-	DailyLossLimit decimal.Decimal   `json:"daily_loss_limit"` // % of initial balance (e.g., 0.05 for 5%)
+	TP               decimal.Decimal     `json:"tp"`
+	SL               decimal.Decimal     `json:"sl"`
+	TrailingSL       bool                `json:"trailing_sl"`         // Enable trailing stop-loss
+	TrailingSLPct    decimal.Decimal     `json:"trailing_sl_pct"`     // Trailing distance (e.g., 0.003 = 0.3%)
+	Balance          decimal.Decimal     `json:"balance"`
+	InitialBalance   decimal.Decimal     `json:"initial_balance"`
+	RiskPerTrade     decimal.Decimal     `json:"risk_per_trade"`
+	MaxOpenTrades    int                 `json:"max_open_trades"`
+	DailyLossLimit   decimal.Decimal     `json:"daily_loss_limit"`
 	
 	// Circuit Breaker State
 	TradingEnabled bool              `json:"trading_enabled"`
 	LastDailyReset time.Time         `json:"last_daily_reset"`
 	DailyPnL       decimal.Decimal   `json:"daily_pnl"`
+
+	// External services
+	Notifier notifier.Notifier `json:"-"`
 }
 
 func NewPaperTrader(balance float64) *PaperTrader {
@@ -52,11 +61,13 @@ func NewPaperTrader(balance float64) *PaperTrader {
 		Completed:      make([]Trade, 0),
 		TP:             decimal.NewFromFloat(0.005),
 		SL:             decimal.NewFromFloat(0.003),
+		TrailingSL:     true,
+		TrailingSLPct:  decimal.NewFromFloat(0.003), // 0.3% trailing distance
 		Balance:        bal,
 		InitialBalance: bal,
-		RiskPerTrade:   decimal.NewFromFloat(0.01), // 1% default risk
+		RiskPerTrade:   decimal.NewFromFloat(0.01),
 		MaxOpenTrades:  5,
-		DailyLossLimit: decimal.NewFromFloat(0.05), // 5% daily limit
+		DailyLossLimit: decimal.NewFromFloat(0.05),
 		TradingEnabled: true,
 		LastDailyReset: time.Now(),
 		DailyPnL:       decimal.Zero,
@@ -91,13 +102,14 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 	quantity := riskAmount.Div(sig.Price.Mul(p.SL))
 
 	trade := &Trade{
-		Symbol:     sig.Symbol,
-		EntryPrice: sig.Price,
-		Quantity:   quantity,
-		Direction:  sig.Direction,
-		Time:       sig.Timestamp,
-		Exits:      make(map[int]decimal.Decimal),
-		Status:     "ACTIVE",
+		Symbol:        sig.Symbol,
+		EntryPrice:    sig.Price,
+		Quantity:      quantity,
+		Direction:     sig.Direction,
+		Time:          sig.Timestamp,
+		Exits:         make(map[int]decimal.Decimal),
+		Status:        "ACTIVE",
+		HighWaterMark: sig.Price, // Initialize HWM at entry
 	}
 	p.ActiveTrades[sig.Symbol] = append(p.ActiveTrades[sig.Symbol], trade)
 	
@@ -107,6 +119,11 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		Str("price", sig.Price.String()).
 		Str("quantity", quantity.StringFixed(4)).
 		Msg("New trade opened")
+
+	if p.Notifier != nil {
+		p.Notifier.Notify(fmt.Sprintf("🚀 *NEW TRADE*\nSymbol: `%s`\nDirection: %s\nPrice: %s\nQty: %s",
+			sig.Symbol, sig.Direction, sig.Price.String(), quantity.StringFixed(4)))
+	}
 }
 
 func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal, now time.Time) {
@@ -119,30 +136,82 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 	}
 
 	remainingTrades := make([]*Trade, 0, len(trades))
+	one := decimal.NewFromInt(1)
 
 	for _, t := range trades {
+		// Update High Water Mark for trailing SL
+		if t.Direction == "BUY" && currentPrice.GreaterThan(t.HighWaterMark) {
+			t.HighWaterMark = currentPrice
+		} else if t.Direction == "SELL" && currentPrice.LessThan(t.HighWaterMark) {
+			t.HighWaterMark = currentPrice
+		}
+
 		isWin := false
 		isLoss := false
+		exitReason := ""
 
+		// Check fixed TP
 		if t.Direction == "BUY" {
-			if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(decimal.NewFromInt(1).Add(p.TP))) {
+			if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(p.TP))) {
 				isWin = true
-			} else if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(decimal.NewFromInt(1).Sub(p.SL))) {
-				isLoss = true
+				exitReason = "TP_HIT"
 			}
 		} else {
-			if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(decimal.NewFromInt(1).Sub(p.TP))) {
+			if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(one.Sub(p.TP))) {
 				isWin = true
-			} else if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(decimal.NewFromInt(1).Add(p.SL))) {
-				isLoss = true
+				exitReason = "TP_HIT"
+			}
+		}
+
+		// Check Trailing SL (if enabled) or fixed SL
+		if !isWin {
+			if p.TrailingSL {
+				// Trailing SL: stop is relative to HWM, not entry
+				if t.Direction == "BUY" {
+					trailStop := t.HighWaterMark.Mul(one.Sub(p.TrailingSLPct))
+					if currentPrice.LessThanOrEqual(trailStop) {
+						// It's a win if we're still above entry
+						if currentPrice.GreaterThan(t.EntryPrice) {
+							isWin = true
+						} else {
+							isLoss = true
+						}
+						exitReason = "TRAILING_SL"
+					}
+				} else {
+					trailStop := t.HighWaterMark.Mul(one.Add(p.TrailingSLPct))
+					if currentPrice.GreaterThanOrEqual(trailStop) {
+						if currentPrice.LessThan(t.EntryPrice) {
+							isWin = true
+						} else {
+							isLoss = true
+						}
+						exitReason = "TRAILING_SL"
+					}
+				}
+			} else {
+				// Fixed SL
+				if t.Direction == "BUY" {
+					if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(one.Sub(p.SL))) {
+						isLoss = true
+						exitReason = "FIXED_SL"
+					}
+				} else {
+					if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(p.SL))) {
+						isLoss = true
+						exitReason = "FIXED_SL"
+					}
+				}
 			}
 		}
 
 		if isWin || isLoss {
+			t.ExitReason = exitReason
 			p.closeTrade(t, currentPrice, isWin)
 			continue
 		}
 
+		// Time-based exit checks
 		duration := now.Sub(t.Time).Minutes()
 		checkIntervals := []int{1, 5, 10}
 		for _, interval := range checkIntervals {
@@ -158,6 +227,7 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 			} else if t.Direction == "SELL" && currentPrice.LessThan(t.EntryPrice) {
 				isWinAt10 = true
 			}
+			t.ExitReason = "TIME_EXIT"
 			p.closeTrade(t, currentPrice, isWinAt10)
 			continue
 		}
@@ -199,9 +269,20 @@ func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin b
 		Str("direction", t.Direction).
 		Str("entry", t.EntryPrice.String()).
 		Str("exit", currentPrice.String()).
+		Str("hwm", t.HighWaterMark.String()).
 		Str("pnl", pnl.StringFixed(2)).
+		Str("reason", t.ExitReason).
 		Str("result", t.Status).
 		Msg("Trade closed")
+
+	if p.Notifier != nil {
+		emoji := "❌"
+		if t.Status == "WIN" {
+			emoji = "✅"
+		}
+		p.Notifier.Notify(fmt.Sprintf("%s *TRADE CLOSED*\nSymbol: `%s`\nDirection: %s\nEntry: %s → Exit: %s\nHigh: %s\nPnL: `%s`\nReason: %s\nResult: *%s*",
+			emoji, t.Symbol, t.Direction, t.EntryPrice.String(), currentPrice.String(), t.HighWaterMark.String(), pnl.StringFixed(2), t.ExitReason, t.Status))
+	}
 
 	// Check Circuit Breaker
 	lossLimit := p.InitialBalance.Mul(p.DailyLossLimit).Neg()
@@ -211,6 +292,11 @@ func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin b
 			Str("daily_pnl", p.DailyPnL.StringFixed(2)).
 			Str("limit", lossLimit.StringFixed(2)).
 			Msg("CIRCUIT BREAKER TRIGGERED: Daily loss limit hit. Trading suspended.")
+
+		if p.Notifier != nil {
+			p.Notifier.Notify(fmt.Sprintf("🛑 *CIRCUIT BREAKER TRIGGERED*\nDaily PnL: `%s`\nLimit: `%s`\nTrading has been *SUSPENDED*",
+				p.DailyPnL.StringFixed(2), lossLimit.StringFixed(2)))
+		}
 	}
 	
 	p.Completed = append(p.Completed, *t)

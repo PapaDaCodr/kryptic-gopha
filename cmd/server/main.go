@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/papadacodr/kryptic-gopha/internal/engine"
 	"github.com/papadacodr/kryptic-gopha/internal/ingester"
+	"github.com/papadacodr/kryptic-gopha/pkg/notifier"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
@@ -21,6 +24,9 @@ import (
 const stateFile = "trader_state.json"
 
 func init() {
+	// Load .env file (ignore error if not found, e.g. in Docker)
+	_ = godotenv.Load()
+
 	// Configure zerolog for production (JSON) or development (Console)
 	if os.Getenv("ENV") == "dev" {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
@@ -47,11 +53,66 @@ func main() {
 	)
 
 	trader := engine.NewPaperTrader(getEnvFloat("INITIAL_BALANCE", 10000.0))
-	trader.TP = getEnvDecimal("TP", "0.005")
-	trader.SL = getEnvDecimal("SL", "0.003")
-	trader.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.01")
-	trader.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.05")
+	trader.TP = getEnvDecimal("TP", "0.05") // 5% Take Profit (high ROI target)
+	trader.SL = getEnvDecimal("SL", "0.02") // 2% Fixed Stop-Loss
+	trader.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.02") // 2% Risk
+	trader.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.06") // 6% Daily Loss Circuit Breaker
 	trader.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
+	trader.TrailingSL = os.Getenv("TRAILING_SL") != "false" // Enabled by default
+	trader.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.015") // 1.5% trailing stop to capture big moves
+
+	// 2b. Telegram Notifications
+	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	tgChatID := os.Getenv("TELEGRAM_CHAT_ID")
+	if tgToken != "" && tgChatID != "" {
+		tgNotifier := notifier.NewTelegramNotifier(tgToken, tgChatID)
+		trader.Notifier = tgNotifier
+		log.Info().Msg("Telegram notifications enabled")
+		
+		// Start listening for commands
+		tgNotifier.StartListening(func(command string, args []string) string {
+			switch command {
+			case "/status":
+				trader.Lock()
+				defer trader.Unlock()
+				status := "ACTIVE 🟢"
+				if !trader.TradingEnabled {
+					status = "SUSPENDED 🛑"
+				}
+				active := 0
+				for _, list := range trader.ActiveTrades {
+					active += len(list)
+				}
+				return fmt.Sprintf("🤖 *Bot Status*\n\nStatus: %s\nBalance: $%s\nDaily PnL: $%s\nActive Trades: %d", 
+					status, trader.Balance.StringFixed(2), trader.DailyPnL.StringFixed(2), active)
+					
+			case "/stop":
+				trader.Lock()
+				defer trader.Unlock()
+				trader.TradingEnabled = false
+				return "🛑 Trading has been manually *SUSPENDED*."
+				
+			case "/setbalance":
+				if len(args) == 0 {
+					return "Please provide an amount. Example: `/setbalance 50000`"
+				}
+				amount, err := decimal.NewFromString(args[0])
+				if err != nil {
+					return "Invalid amount format."
+				}
+				trader.Lock()
+				defer trader.Unlock()
+				trader.Balance = amount
+				trader.InitialBalance = amount
+				return fmt.Sprintf("✅ Balance successfully updated to *$%s*.", amount.StringFixed(2))
+			
+			default:
+				return "Unknown command. Available:\n/status\n/stop\n/setbalance <amount>"
+			}
+		})
+	} else {
+		log.Warn().Msg("Telegram not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable.")
+	}
 
 	// 3. Load previous state if exists
 	if _, err := os.Stat(stateFile); err == nil {
@@ -136,6 +197,41 @@ func main() {
 			"active_trades": len(trader.ActiveTrades),
 		})
 	})
+
+	// Dashboard API Endpoints
+	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// The simplest way to return state is to let it marshal
+		trader.Lock()
+		defer trader.Unlock()
+		json.NewEncoder(w).Encode(trader)
+	})
+
+	mux.HandleFunc("/api/trades", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		trader.Lock()
+		defer trader.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"active":    trader.ActiveTrades,
+			"completed": trader.Completed,
+		})
+	})
+
+	mux.HandleFunc("/api/candles", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		symbol := r.URL.Query().Get("symbol")
+		if symbol == "" {
+			http.Error(w, `{"error":"symbol required"}`, http.StatusBadRequest)
+			return
+		}
+		
+		candles := mgr.GetCandles(symbol)
+		json.NewEncoder(w).Encode(candles)
+	})
+
+	// Serve the dashboard statically
+	fs := http.FileServer(http.Dir("./web"))
+	mux.Handle("/", fs)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
