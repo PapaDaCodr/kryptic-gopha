@@ -1,5 +1,38 @@
+# Binaries and Compiled Files
+/bot
+/server
+/main
+/backtester
+/generate_dummy_data
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 
+# Environment Secrets
+.env
+.env.local
+.env.*.local
 
-#Ignore vscode AI rules
-.github/instructions/
+# Project Specific Data/Logs
+*.log
+data.csv
+/tmp/
+
+# IDE Metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Go Specifics
+vendor/
+pkg/
+bin/
+*.test
+*.out
+
+# Tooling
 .codacy/
+.github/instructions/
