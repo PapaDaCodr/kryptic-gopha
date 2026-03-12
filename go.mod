@@ -1,4 +1,4 @@
-module github.com/papadacodr
+module github.com/papadacodr/kryptic-gopha
 
 go 1.22.2
 
