@@ -61,6 +61,7 @@ type EfficientMultiFactorStrategy struct {
 	ShortPeriod int
 	LongPeriod  int
 	RSIPeriod   int
+	MacroPeriod int // e.g. 200 EMA for Macro Trend Filter
 	
 	// State per symbol
 	lastEMA     map[string]map[int]decimal.Decimal // symbol -> period -> value
@@ -74,6 +75,7 @@ func NewEfficientStrategy(short, long, rsi int) *EfficientMultiFactorStrategy {
 		ShortPeriod: short,
 		LongPeriod:  long,
 		RSIPeriod:   rsi,
+		MacroPeriod: 200, // Hardcoded standard for macro trend
 		lastEMA:     make(map[string]map[int]decimal.Decimal),
 		lastAvgGain: make(map[string]decimal.Decimal),
 		lastAvgLoss: make(map[string]decimal.Decimal),
@@ -82,7 +84,8 @@ func NewEfficientStrategy(short, long, rsi int) *EfficientMultiFactorStrategy {
 }
 
 func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.Signal {
-	if len(prices) < s.LongPeriod || len(prices) < s.RSIPeriod+1 {
+	// We need enough data for the Macro Period (200)
+	if len(prices) < s.MacroPeriod || len(prices) < s.RSIPeriod+1 {
 		return nil
 	}
 
@@ -93,14 +96,17 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 		s.lastEMA[symbol] = make(map[int]decimal.Decimal)
 		s.lastEMA[symbol][s.ShortPeriod] = calculateEMA(prices[:len(prices)-1], s.ShortPeriod)
 		s.lastEMA[symbol][s.LongPeriod] = calculateEMA(prices[:len(prices)-1], s.LongPeriod)
+		s.lastEMA[symbol][s.MacroPeriod] = calculateEMA(prices[:len(prices)-1], s.MacroPeriod)
 		s.initRSI(symbol, prices[:len(prices)-1])
 	}
 
 	shortEMA := updateEMA(s.lastEMA[symbol][s.ShortPeriod], currentPrice, s.ShortPeriod)
 	longEMA := updateEMA(s.lastEMA[symbol][s.LongPeriod], currentPrice, s.LongPeriod)
+	macroEMA := updateEMA(s.lastEMA[symbol][s.MacroPeriod], currentPrice, s.MacroPeriod)
 	
 	s.lastEMA[symbol][s.ShortPeriod] = shortEMA
 	s.lastEMA[symbol][s.LongPeriod] = longEMA
+	s.lastEMA[symbol][s.MacroPeriod] = macroEMA
 
 	rsi := s.calculateIncrementalRSI(symbol, prices)
 	rsiFloat, _ := rsi.Float64()
@@ -110,24 +116,34 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 		return (50 - v) / 50
 	}(rsiFloat)))
 
-	if shortEMA.GreaterThan(longEMA) && rsiFloat < 40 {
+	// Strategic Optimization:
+	// 1. MACRO TREND FILTER: Price MUST be on the right side of the 200 EMA.
+	// 2. ENTRY TRIGGER: Short EMA crosses Long EMA in the direction of the Macro Trend.
+	// 3. MOMENTUM FILTER: RSI prevents buying at the absolute top or selling at the bottom.
+
+	isBullMarket := currentPrice.GreaterThan(macroEMA)
+	isBearMarket := currentPrice.LessThan(macroEMA)
+
+	// BUY Condition: Bull Market + Bullish Cross + RSI Not Overbought (< 70)
+	if isBullMarket && shortEMA.GreaterThan(longEMA) && rsiFloat < 70 {
 		return &models.Signal{
 			Symbol:     symbol,
 			Price:      currentPrice,
 			Direction:  "BUY",
-			Reason:     fmt.Sprintf("Trend:UP | RSI:%.2f", rsiFloat),
-			Confidence: confidence,
+			Reason:     fmt.Sprintf("Trend:UP (+200EMA) | RSI:%.2f", rsiFloat),
+			Confidence: confidence * 1.2, // Boost confidence due to macro alignment
 			Timestamp:  time.Now(),
 		}
 	}
 
-	if shortEMA.LessThan(longEMA) && rsiFloat > 60 {
+	// SELL Condition: Bear Market + Bearish Cross + RSI Not Oversold (> 30)
+	if isBearMarket && shortEMA.LessThan(longEMA) && rsiFloat > 30 {
 		return &models.Signal{
 			Symbol:     symbol,
 			Price:      currentPrice,
 			Direction:  "SELL",
-			Reason:     fmt.Sprintf("Trend:DOWN | RSI:%.2f", rsiFloat),
-			Confidence: confidence,
+			Reason:     fmt.Sprintf("Trend:DOWN (-200EMA) | RSI:%.2f", rsiFloat),
+			Confidence: confidence * 1.2,
 			Timestamp:  time.Now(),
 		}
 	}

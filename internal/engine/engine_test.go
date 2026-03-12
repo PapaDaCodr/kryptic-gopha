@@ -9,6 +9,7 @@ import (
 
 func TestStrategy_RSIAccuracy(t *testing.T) {
 	s := NewEfficientStrategy(2, 5, 3)
+	s.MacroPeriod = 5 // Override default 200 for this small test
 	symbol := "BTC"
 	priceVals := []string{"100", "102", "101", "105", "108", "107", "110", "112", "111"}
 	prices := make([]decimal.Decimal, len(priceVals))
@@ -35,6 +36,7 @@ func TestStrategy_RSIAccuracy(t *testing.T) {
 
 func TestEngineManager_OHLCV(t *testing.T) {
 	strategy := NewEfficientStrategy(2, 4, 2)
+	strategy.MacroPeriod = 4 // Override for test
 	mgr := NewEngineManager([]string{"BTC"}, 10, strategy, nil)
 	now := time.Now().Truncate(time.Minute)
 
@@ -63,7 +65,9 @@ func TestEngineManager_OHLCV(t *testing.T) {
 
 func TestEngineManager_Concurrency(t *testing.T) {
 	symbols := []string{"BTC", "ETH", "SOL", "BNB"}
-	mgr := NewEngineManager(symbols, 10, NewEfficientStrategy(2, 4, 2), nil)
+	strategy := NewEfficientStrategy(2, 4, 2)
+	strategy.MacroPeriod = 4
+	mgr := NewEngineManager(symbols, 10, strategy, nil)
 	
 	const iterations = 100
 	done := make(chan bool)
@@ -106,8 +110,9 @@ func TestPriceBuffer_Circular(t *testing.T) {
 }
 
 func TestStrategy_IncrementalAccuracy(t *testing.T) {
-	s := NewEfficientStrategy(2, 5, 3)
-	symbol := "BTC"
+	s := NewEfficientStrategy(2, 4, 3)
+	s.MacroPeriod = 4 // Override for small test
+	symbol := "ETH"
 	priceVals := []string{"100", "102", "101", "105", "104", "108", "107"}
 	prices := make([]decimal.Decimal, len(priceVals))
 	for i, v := range priceVals {
@@ -165,6 +170,7 @@ func TestPaperTrader_TimeExit(t *testing.T) {
 
 func TestEngineManager_UpdatePrice(t *testing.T) {
 	strategy := NewEfficientStrategy(2, 4, 2)
+	strategy.MacroPeriod = 4
 	trader := NewPaperTrader(10000.0)
 	symbols := []string{"BTCUSDT"}
 	mgr := NewEngineManager(symbols, 10, strategy, trader)
