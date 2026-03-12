@@ -30,7 +30,7 @@ func main() {
 
 	// 2. Initialize Strategy & Trader
 	strategy := engine.NewEfficientStrategy(12, 26, 14)
-	trader := engine.NewPaperTrader()
+	trader := engine.NewPaperTrader(10000.0)
 	
 	mgr := engine.NewEngineManager([]string{*symbol}, 1000, strategy, trader)
 
