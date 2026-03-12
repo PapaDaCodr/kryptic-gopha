@@ -13,7 +13,7 @@ type marketData struct {
 	Time   int64  `json:"T"`
 }
 
-func startBinanceStream(symbols []string) {
+func StartBinanceStream(symbols []string) {
 
 	for i, s:= range symbols {
 		symbols[i] = strings.ToLower(s) + "@trade"
