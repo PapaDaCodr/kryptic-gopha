@@ -12,6 +12,7 @@ import (
 type symbolState struct {
 	sync.Mutex
 	buffer         *PriceBuffer
+	history        []models.Candle // Stores completed candles for the dashboard
 	currentCandle  *models.Candle
 	lastSignalType string
 	lastSignalTime time.Time
@@ -34,7 +35,8 @@ func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trade
 	
 	for _, s := range symbols {
 		mgr.states[s] = &symbolState{
-			buffer: NewPriceBuffer(bufferSize),
+			buffer:  NewPriceBuffer(bufferSize),
+			history: make([]models.Candle, 0, bufferSize),
 		}
 	}
 	return mgr
@@ -64,6 +66,11 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	if curr == nil || tickTime.After(curr.Time) {
 		if curr != nil {
 			state.buffer.Add(curr.Close)
+			// Store the completed candle in history
+			state.history = append(state.history, *curr)
+			if len(state.history) > state.buffer.size {
+				state.history = state.history[1:]
+			}
 			m.analyzeInternal(tick.Symbol, state)
 		}
 
@@ -103,17 +110,19 @@ func (m *EngineManager) analyzeInternal(symbol string, state *symbolState) {
 			}
 		}
 	}
-}// GetCandles returns the recent OHLCV history for a symbol
-func (m *EngineManager) GetCandles(symbol string) []models.PricePoint {
-state, exists := m.states[symbol]
-if !exists {
- nil
 }
-state.Lock()
-defer state.Unlock()
 
-history := state.buffer.GetHistory()
-result := make([]models.PricePoint, len(history))
-copy(result, history)
-return result
+// GetCandles returns the recent OHLCV history for a symbol
+func (m *EngineManager) GetCandles(symbol string) []models.Candle {
+	state, exists := m.states[symbol]
+	if !exists {
+		return nil
+	}
+	state.Lock()
+	defer state.Unlock()
+
+	// Return a copy of history
+	res := make([]models.Candle, len(state.history))
+	copy(res, state.history)
+	return res
 }
