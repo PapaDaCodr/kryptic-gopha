@@ -13,8 +13,8 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
-RUN go build -o main ./cmd/server/main.go
+# Build the production bot
+RUN go build -o bot ./cmd/server/main.go
 
 # Final stage
 FROM alpine:latest
@@ -22,10 +22,10 @@ FROM alpine:latest
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /app/main .
+COPY --from=builder /app/bot .
 
 # Expose the health check port
 EXPOSE 8080
 
-# Run the application
-CMD ["./main"]
+# Run the trading bot
+CMD ["./bot"]
