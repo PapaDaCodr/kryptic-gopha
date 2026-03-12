@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/papadacodr/kryptic-gopha/internal/engine"
+	"github.com/papadacodr/kryptic-gopha/internal/models"
 )
 
 const (
@@ -22,13 +24,9 @@ const (
 )
 
 
-type MarketData struct {
-	Symbol string `json:"s"`
-	Price  string `json:"p"`
-	Time   int64  `json:"T"`
-}
 
-func StartBinanceStream(symbols []string) {
+
+func StartBinanceStream(symbols []string, mgr *engine.EngineManager) {
 	normalizedSymbols := normalizeSymbols(symbols)
 	url := binanceStreamURL + strings.Join(normalizedSymbols, "/")
 
@@ -47,7 +45,7 @@ func StartBinanceStream(symbols []string) {
 		retryDelay = initialRetryDelay 
 
 		go monitorConnection(conn)
-		handleConnectionClosed(conn)
+		handleConnectionClosed(conn, mgr)
 		conn.Close()
 	}
 }
@@ -90,7 +88,7 @@ func monitorConnection(conn *websocket.Conn) {
 	}
 }
 
-func handleConnectionClosed(conn *websocket.Conn) {
+func handleConnectionClosed(conn *websocket.Conn, mgr *engine.EngineManager) {
 	conn.SetReadDeadline(time.Now().Add(readTimeout))
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -105,13 +103,13 @@ func handleConnectionClosed(conn *websocket.Conn) {
 			return
 		}
 
-		processMarketData(message)
+		processMarketData(message, mgr)
 	}
 }
 
-func processMarketData(message []byte) {
+func processMarketData(message []byte, mgr *engine.EngineManager) {
 	var payload struct {
-		Data MarketData `json:"data"`
+		Data models.MarketTick `json:"data"`
 	}
 
 	if err := json.Unmarshal(message, &payload); err != nil {
@@ -119,5 +117,8 @@ func processMarketData(message []byte) {
 		return
 	}
 
-	log.Printf("[%s] Price: $%s", payload.Data.Symbol, payload.Data.Price)
+	if err := mgr.UpdatePrice(payload.Data); err != nil {
+		log.Printf("Failed to update price for %s: %v", payload.Data.Symbol, err)
+	}
 }
+
