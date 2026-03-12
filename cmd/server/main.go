@@ -53,6 +53,8 @@ func main() {
 	trader.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.01")
 	trader.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.05")
 	trader.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
+	trader.TrailingSL = os.Getenv("TRAILING_SL") != "false" // Enabled by default
+	trader.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.003")
 
 	// 2b. Telegram Notifications
 	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
