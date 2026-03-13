@@ -318,12 +318,44 @@ func (p *PaperTrader) checkDailyReset() {
 func (p *PaperTrader) GetWinRate() float64 {
 	p.Lock()
 	defer p.Unlock()
-	
+
 	total := p.TotalWins + p.TotalLosses
 	if total == 0 {
 		return 0
 	}
 	return float64(p.TotalWins) / float64(total) * 100
+}
+
+// TraderStats is a point-in-time snapshot of trader health metrics.
+type TraderStats struct {
+	TotalSignals int
+	WinRate      float64
+	ActiveTrades int
+}
+
+// GetStats returns a consistent snapshot of health metrics under a single lock.
+// Use this instead of reading individual fields from multiple callsites to avoid
+// data races.
+func (p *PaperTrader) GetStats() TraderStats {
+	p.Lock()
+	defer p.Unlock()
+
+	total := p.TotalWins + p.TotalLosses
+	winRate := 0.0
+	if total > 0 {
+		winRate = float64(p.TotalWins) / float64(total) * 100
+	}
+
+	activeTrades := 0
+	for _, trades := range p.ActiveTrades {
+		activeTrades += len(trades)
+	}
+
+	return TraderStats{
+		TotalSignals: total,
+		WinRate:      winRate,
+		ActiveTrades: activeTrades,
+	}
 }
 
 func (p *PaperTrader) SaveState(filename string) error {
