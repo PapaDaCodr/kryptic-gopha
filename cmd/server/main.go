@@ -185,10 +185,11 @@ func main() {
 				if err := trader.SaveState(stateFile); err != nil {
 					log.Error().Err(err).Msg("Failed to save state")
 				}
-				
+
+				stats := trader.GetStats()
 				log.Info().
-					Int("total_signals", trader.TotalWins+trader.TotalLosses).
-					Float64("win_rate", trader.GetWinRate()).
+					Int("total_signals", stats.TotalSignals).
+					Float64("win_rate", stats.WinRate).
 					Msg("Periodic report")
 			}
 		}
@@ -201,13 +202,14 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		stats := trader.GetStats()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":        "OK",
 			"watchlist":     watchlist,
-			"total_signals": trader.TotalWins + trader.TotalLosses,
-			"win_rate":      trader.GetWinRate(),
-			"active_trades": len(trader.ActiveTrades),
+			"total_signals": stats.TotalSignals,
+			"win_rate":      stats.WinRate,
+			"active_trades": stats.ActiveTrades,
 		})
 	})
 
@@ -257,8 +259,11 @@ func main() {
 	mux.Handle("/", fs)
 
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
+		Addr:         ":" + port,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	go func() {
