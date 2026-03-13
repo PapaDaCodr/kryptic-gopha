@@ -7,6 +7,43 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// referenceRSI computes RSI with Wilder's smoothing over all prices.
+// Used only in tests to verify the incremental implementation stays accurate.
+func referenceRSI(prices []decimal.Decimal, period int) decimal.Decimal {
+	if len(prices) <= period {
+		return decimal.NewFromInt(50)
+	}
+	totalGain, totalLoss := decimal.Zero, decimal.Zero
+	for i := 1; i <= period; i++ {
+		change := prices[i].Sub(prices[i-1])
+		if change.IsPositive() {
+			totalGain = totalGain.Add(change)
+		} else {
+			totalLoss = totalLoss.Sub(change)
+		}
+	}
+	n := decimal.NewFromInt(int64(period))
+	nm1 := decimal.NewFromInt(int64(period - 1))
+	avgGain := totalGain.Div(n)
+	avgLoss := totalLoss.Div(n)
+	for i := period + 1; i < len(prices); i++ {
+		change := prices[i].Sub(prices[i-1])
+		gain, loss := decimal.Zero, decimal.Zero
+		if change.IsPositive() {
+			gain = change
+		} else {
+			loss = change.Neg()
+		}
+		avgGain = avgGain.Mul(nm1).Add(gain).Div(n)
+		avgLoss = avgLoss.Mul(nm1).Add(loss).Div(n)
+	}
+	if avgLoss.IsZero() {
+		return decimal.NewFromInt(100)
+	}
+	rs := avgGain.Div(avgLoss)
+	return decimal.NewFromInt(100).Sub(decimal.NewFromInt(100).Div(decimal.NewFromInt(1).Add(rs)))
+}
+
 func TestStrategy_RSIAccuracy(t *testing.T) {
 	s := NewEfficientStrategy(2, 5, 3)
 	s.MacroPeriod = 5 // Override default 200 for this small test
@@ -17,15 +54,15 @@ func TestStrategy_RSIAccuracy(t *testing.T) {
 		prices[i], _ = decimal.NewFromString(v)
 	}
 
-	// 1. Full calculation baseline
-	targetRSI := calculateRSI(prices, 3)
+	// 1. Full calculation baseline using local reference implementation.
+	targetRSI := referenceRSI(prices, 3)
 
-	// 2. Incremental
+	// 2. Drive the incremental implementation to the same end-state.
 	for i := 1; i <= len(prices); i++ {
 		s.Analyze(symbol, prices[:i])
 	}
 
-	// Calculate RSI from internal state to verify accuracy
+	// Reconstruct RSI from incremental state and compare.
 	rs := s.lastAvgGain[symbol].Div(s.lastAvgLoss[symbol])
 	gotRSI := decimal.NewFromInt(100).Sub(decimal.NewFromInt(100).Div(decimal.NewFromInt(1).Add(rs)))
 
