@@ -138,6 +138,12 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 	isBullMarket := currentPrice.GreaterThan(macroEMA)
 	isBearMarket := currentPrice.LessThan(macroEMA)
 
+	// Clamp boosted confidence to [0, 1].
+	boosted := confidence * 1.2
+	if boosted > 1.0 {
+		boosted = 1.0
+	}
+
 	// BUY Condition: Bull Market + Bullish Cross + RSI Not Overbought (< 70)
 	if isBullMarket && shortEMA.GreaterThan(longEMA) && rsiFloat < 70 {
 		return &models.Signal{
@@ -145,7 +151,7 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 			Price:      currentPrice,
 			Direction:  "BUY",
 			Reason:     fmt.Sprintf("Trend:UP (+200EMA) | RSI:%.2f", rsiFloat),
-			Confidence: confidence * 1.2, // Boost confidence due to macro alignment
+			Confidence: boosted,
 			Timestamp:  time.Now(),
 			TP:         currentPrice.Mul(decimal.NewFromFloat(1.05)),
 			SL:         currentPrice.Mul(decimal.NewFromFloat(0.98)),
@@ -159,7 +165,7 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 			Price:      currentPrice,
 			Direction:  "SELL",
 			Reason:     fmt.Sprintf("Trend:DOWN (-200EMA) | RSI:%.2f", rsiFloat),
-			Confidence: confidence * 1.2,
+			Confidence: boosted,
 			Timestamp:  time.Now(),
 			TP:         currentPrice.Mul(decimal.NewFromFloat(0.95)),
 			SL:         currentPrice.Mul(decimal.NewFromFloat(1.02)),
@@ -256,48 +262,3 @@ func calculateEMA(prices []decimal.Decimal, period int) decimal.Decimal {
 	return ema
 }
 
-func calculateRSI(prices []decimal.Decimal, period int) decimal.Decimal {
-	if len(prices) <= period {
-		return decimal.NewFromInt(50)
-	}
-
-	totalGain := decimal.Zero
-	totalLoss := decimal.Zero
-	for i := 1; i <= period; i++ {
-		change := prices[i].Sub(prices[i-1])
-		if change.IsPositive() {
-			totalGain = totalGain.Add(change)
-		} else {
-			totalLoss = totalLoss.Sub(change)
-		}
-	}
-
-	avgGain := totalGain.Div(decimal.NewFromInt(int64(period)))
-	avgLoss := totalLoss.Div(decimal.NewFromInt(int64(period)))
-
-	periodDec := decimal.NewFromInt(int64(period))
-	periodMinusOneDec := decimal.NewFromInt(int64(period - 1))
-
-	for i := period + 1; i < len(prices); i++ {
-		change := prices[i].Sub(prices[i-1])
-		gain, loss := decimal.Zero, decimal.Zero
-		if change.IsPositive() {
-			gain = change
-		} else {
-			loss = change.Neg()
-		}
-		// Wilder's Smoothing: (PrevAvg * (N-1) + CurrentValue) / N
-		avgGain = avgGain.Mul(periodMinusOneDec).Add(gain).Div(periodDec)
-		avgLoss = avgLoss.Mul(periodMinusOneDec).Add(loss).Div(periodDec)
-	}
-
-	if avgLoss.IsZero() {
-		if avgGain.IsZero() {
-			return decimal.NewFromInt(50)
-		}
-		return decimal.NewFromInt(100)
-	}
-
-	rs := avgGain.Div(avgLoss)
-	return decimal.NewFromInt(100).Sub(decimal.NewFromInt(100).Div(decimal.NewFromInt(1).Add(rs)))
-}
