@@ -20,18 +20,20 @@ type symbolState struct {
 }
 
 type EngineManager struct {
-	states   map[string]*symbolState
-	Strategy Strategy
-	Signals  chan models.Signal
-	Trader   Trader
+	states      map[string]*symbolState
+	Strategy    Strategy
+	Signals     chan models.Signal
+	Trader      Trader
+	BarInterval time.Duration // Candle aggregation interval (default: 1 minute)
 }
 
 func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trader Trader) *EngineManager {
 	mgr := &EngineManager{
-		states:   make(map[string]*symbolState),
-		Strategy: strategy,
-		Signals:  make(chan models.Signal, 1000),
-		Trader:   trader,
+		states:      make(map[string]*symbolState),
+		Strategy:    strategy,
+		Signals:     make(chan models.Signal, 1000),
+		Trader:      trader,
+		BarInterval: time.Minute,
 	}
 	
 	for _, s := range symbols {
@@ -62,7 +64,7 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	defer state.Unlock()
 
 	curr := state.currentCandle
-	tickTime := point.Timestamp.Truncate(time.Minute)
+	tickTime := point.Timestamp.Truncate(m.BarInterval)
 
 	if curr == nil || tickTime.After(curr.Time) {
 		if curr != nil {

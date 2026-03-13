@@ -189,6 +189,12 @@ func main() {
 	}
 
 	mgr := engine.NewEngineManager(watchlist, 500, strategy, trader)
+	barSeconds := getEnvInt("BAR_INTERVAL_SECONDS", 60)
+	if barSeconds < 1 {
+		log.Fatal().Int("BAR_INTERVAL_SECONDS", barSeconds).Msg("BAR_INTERVAL_SECONDS must be >= 1")
+	}
+	mgr.BarInterval = time.Duration(barSeconds) * time.Second
+	log.Info().Int("bar_interval_seconds", barSeconds).Msg("Bar interval configured")
 	
 	// 4. Warm-up Phase: Load historical data
 	log.Info().Int("count", len(watchlist)).Msg("Starting warm-up phase")
