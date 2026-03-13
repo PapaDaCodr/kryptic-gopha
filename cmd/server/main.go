@@ -73,19 +73,18 @@ func main() {
 		tgNotifier.StartListening(ctx, func(command string, args []string) string {
 			switch command {
 			case "/status":
-				trader.Lock()
-				defer trader.Unlock()
+				st := trader.GetState()
 				status := "ACTIVE 🟢"
-				if !trader.TradingEnabled {
+				if !st.TradingEnabled {
 					status = "SUSPENDED 🛑"
 				}
 				active := 0
-				for _, list := range trader.ActiveTrades {
+				for _, list := range st.ActiveTrades {
 					active += len(list)
 				}
-				return fmt.Sprintf("🤖 *Bot Status*\n\nStatus: %s\nBalance: $%s\nDaily PnL: $%s\nActive Trades: %d", 
-					status, trader.Balance.StringFixed(2), trader.DailyPnL.StringFixed(2), active)
-					
+				return fmt.Sprintf("🤖 *Bot Status*\n\nStatus: %s\nBalance: $%s\nDaily PnL: $%s\nActive Trades: %d",
+					status, st.Balance.StringFixed(2), st.DailyPnL.StringFixed(2), active)
+
 			case "/help", "/start":
 				return "🤖 *Kryptic Gopha Commands*\n\n" +
 					"• `/status` - Show bot health and PnL\n" +
@@ -94,11 +93,9 @@ func main() {
 					"• `/help` - Show this list"
 
 			case "/stop":
-				trader.Lock()
-				defer trader.Unlock()
-				trader.TradingEnabled = false
+				trader.SetTradingEnabled(false)
 				return "🛑 Trading has been manually *SUSPENDED*."
-				
+
 			case "/setbalance":
 				if len(args) == 0 {
 					return "Please provide an amount. Example: `/setbalance 50000`"
@@ -107,12 +104,9 @@ func main() {
 				if err != nil {
 					return "Invalid amount format."
 				}
-				trader.Lock()
-				defer trader.Unlock()
-				trader.Balance = amount
-				trader.InitialBalance = amount
+				trader.SetBalance(amount)
 				return fmt.Sprintf("✅ Balance successfully updated to *$%s*.", amount.StringFixed(2))
-			
+
 			default:
 				return "Unknown command. Available:\n/status\n/stop\n/setbalance <amount>"
 			}
@@ -216,20 +210,12 @@ func main() {
 	// Dashboard API Endpoints
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// The simplest way to return state is to let it marshal
-		trader.Lock()
-		defer trader.Unlock()
-		json.NewEncoder(w).Encode(trader)
+		json.NewEncoder(w).Encode(trader.GetState())
 	})
 
 	mux.HandleFunc("/api/trades", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		trader.Lock()
-		defer trader.Unlock()
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"active":    trader.ActiveTrades,
-			"completed": trader.Completed,
-		})
+		json.NewEncoder(w).Encode(trader.GetTrades())
 	})
 
 	mux.HandleFunc("/api/signals", func(w http.ResponseWriter, r *http.Request) {
