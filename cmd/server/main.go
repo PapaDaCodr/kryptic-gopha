@@ -46,12 +46,27 @@ func main() {
 		watchStr = "BTCUSDT,ETHUSDT,BNBUSDT"
 	}
 	watchlist := strings.Split(watchStr, ",")
-	
-	strategy := engine.NewEfficientStrategy(
-		getEnvInt("SHORT_PERIOD", 12),
-		getEnvInt("LONG_PERIOD", 26),
-		getEnvInt("RSI_PERIOD", 14),
-	)
+
+	shortPeriod := getEnvInt("SHORT_PERIOD", 12)
+	longPeriod := getEnvInt("LONG_PERIOD", 26)
+	rsiPeriod := getEnvInt("RSI_PERIOD", 14)
+
+	// Validate strategy parameters at startup so misconfiguration is caught early.
+	if shortPeriod <= 0 {
+		log.Fatal().Int("SHORT_PERIOD", shortPeriod).Msg("SHORT_PERIOD must be > 0")
+	}
+	if longPeriod <= shortPeriod {
+		log.Fatal().Int("SHORT_PERIOD", shortPeriod).Int("LONG_PERIOD", longPeriod).
+			Msg("LONG_PERIOD must be > SHORT_PERIOD")
+	}
+	if rsiPeriod <= 1 {
+		log.Fatal().Int("RSI_PERIOD", rsiPeriod).Msg("RSI_PERIOD must be > 1")
+	}
+	if len(watchlist) == 0 || watchlist[0] == "" {
+		log.Fatal().Msg("WATCHLIST must contain at least one symbol")
+	}
+
+	strategy := engine.NewEfficientStrategy(shortPeriod, longPeriod, rsiPeriod)
 
 	// 2b. Select paper or live trading mode.
 	var trader engine.Trader
