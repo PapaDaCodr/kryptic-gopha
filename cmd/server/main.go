@@ -139,11 +139,16 @@ func main() {
 					"• `/status` - Show bot health and PnL\n" +
 					"• `/setbalance <amt>` - Update trading capital\n" +
 					"• `/stop` - Emergency trading suspension\n" +
+					"• `/resume` - Resume after suspension or circuit breaker\n" +
 					"• `/help` - Show this list"
 
 			case "/stop":
 				trader.SetTradingEnabled(false)
 				return "🛑 Trading has been manually *SUSPENDED*."
+
+			case "/resume":
+				trader.SetTradingEnabled(true)
+				return "✅ Trading has been *RESUMED*. Circuit breaker is cleared."
 
 			case "/setbalance":
 				if len(args) == 0 {
@@ -157,7 +162,7 @@ func main() {
 				return fmt.Sprintf("✅ Balance successfully updated to *$%s*.", amount.StringFixed(2))
 
 			default:
-				return "Unknown command. Available:\n/status\n/stop\n/setbalance <amount>"
+				return "Unknown command. Available:\n/status\n/stop\n/resume\n/setbalance <amount>"
 			}
 		})
 	} else {
