@@ -1,316 +1,308 @@
+/**
+ * Kryptic Gopha Dashboard
+ * Single-symbol candlestick view with trade execution markers and signal overlays.
+ */
+
 const state = {
-    symbol: 'BTCUSDT',
-    chart: null,
+    symbol:       null,   // active symbol; set from first watchlist entry
+    watchlist:    [],     // populated from /health on init
+    chart:        null,
     candleSeries: null,
-    tradeMarkers: [],
+    priceLines:   [],     // active TP/SL price lines on the chart
+    tradeMarkers: [],     // EXEC markers for the current symbol
 };
 
-// Formatting helpers
-const formatCurrency = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
-const formatPct = (val) => `${parseFloat(val).toFixed(2)}%`;
+// ─── Formatters ───────────────────────────────────────────────────────────────
+const formatUSD    = v => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v);
+const formatPct    = v => `${parseFloat(v).toFixed(2)}%`;
+const snapMinute   = ts => Math.floor(ts / 60) * 60;
 
-// Helper to align timestamps to minute boundary for charting/markers
-const snapToMinute = (ts) => Math.floor(ts / 60) * 60;
-
+// ─── Initialisation ───────────────────────────────────────────────────────────
 async function init() {
+    // 1. Fetch watchlist from backend before doing anything else.
+    try {
+        const health = await fetch('/health').then(r => r.json());
+        state.watchlist = health.watchlist || ['BTCUSDT'];
+    } catch {
+        state.watchlist = ['BTCUSDT'];
+    }
+
+    state.symbol = state.watchlist[0];
+
+    // 2. Build chart and symbol tabs.
     initChart();
-    
-    // Legend Toggle Logic
-    const btnLegend = document.getElementById('btn-legend');
-    const modalLegend = document.getElementById('legend-modal');
-    const closeLegend = document.getElementById('close-legend');
+    buildSymbolTabs();
 
-    if (btnLegend && modalLegend) {
-        btnLegend.onclick = () => {
-            modalLegend.style.display = modalLegend.style.display === 'none' ? 'block' : 'none';
-        };
-    }
-    if (closeLegend && modalLegend) {
-        closeLegend.onclick = () => {
-            modalLegend.style.display = 'none';
-        };
-    }
+    // 3. Legend toggle.
+    document.getElementById('btn-legend').onclick = () => {
+        const modal = document.getElementById('legend-modal');
+        modal.style.display = modal.style.display === 'none' ? 'block' : 'none';
+    };
+    document.getElementById('close-legend').onclick = () => {
+        document.getElementById('legend-modal').style.display = 'none';
+    };
 
-    await updateState();
-    await updateTrades();
-    await loadChartData(state.symbol);
+    // 4. First load.
+    await refresh();
 
-    // Poll every 5 seconds
-    setInterval(async () => {
-        await updateState();
-        await updateTrades();
-        await loadChartData(state.symbol);
-    }, 5000);
+    // 5. Poll every 5 s.
+    setInterval(refresh, 5000);
 }
 
+// ─── Chart setup ──────────────────────────────────────────────────────────────
 function initChart() {
     const container = document.getElementById('chart');
-    if (!container) return;
-    
-    if (typeof LightweightCharts === 'undefined') {
-        console.error('LightweightCharts library not loaded');
-        return;
-    }
+    if (!container || typeof LightweightCharts === 'undefined' || state.chart) return;
 
-    if (state.chart) return; 
+    state.chart = LightweightCharts.createChart(container, {
+        layout:    { background: { color: '#0f111a' }, textColor: '#94a3b8' },
+        grid:      { vertLines: { color: 'rgba(45,212,191,0.04)' }, horzLines: { color: 'rgba(45,212,191,0.04)' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#1e2235' },
+        rightPriceScale: { borderColor: '#1e2235' },
+    });
 
-    try {
-        state.chart = LightweightCharts.createChart(container, {
-            layout: {
-                background: { color: '#0f111a' },
-                textColor: '#94a3b8',
-            },
-            grid: {
-                vertLines: { color: 'rgba(45, 212, 191, 0.05)' },
-                horzLines: { color: 'rgba(45, 212, 191, 0.05)' },
-            },
-            crosshair: {
-                mode: LightweightCharts.CrosshairMode.Normal,
-            },
-            timeScale: {
-                timeVisible: true,
-                secondsVisible: false,
-            },
-        });
+    state.candleSeries = state.chart.addCandlestickSeries({
+        upColor: '#10b981', downColor: '#ef4444',
+        borderVisible: false,
+        wickUpColor: '#10b981', wickDownColor: '#ef4444',
+    });
 
-        state.candleSeries = state.chart.addCandlestickSeries({
-            upColor: '#10b981',
-            downColor: '#ef4444',
-            borderVisible: false,
-            wickUpColor: '#10b981',
-            wickDownColor: '#ef4444',
-        });
-
-        window.addEventListener('resize', () => {
-            state.chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
-        });
-    } catch (e) {
-        console.error('Failed to initialize chart:', e);
-    }
+    // Responsive resize.
+    const ro = new ResizeObserver(() => {
+        state.chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+    });
+    ro.observe(container);
 }
 
-async function updateState() {
-    try {
-        const res = await fetch('/api/state');
-        const data = await res.json();
-        
-        document.getElementById('val-balance').textContent = formatCurrency(data.balance);
-        document.getElementById('val-daily-pnl').textContent = `Daily PnL: ${formatCurrency(data.daily_pnl)}`;
-        
-        const winEl = document.getElementById('val-winrate');
-        const total = data.total_wins + data.total_losses;
-        const rate = total > 0 ? (data.total_wins / total) * 100 : 0;
-        winEl.textContent = formatPct(rate);
-        winEl.className = `metric-value ${rate >= 50 ? 'positive' : 'negative'}`;
+// ─── Symbol tabs ──────────────────────────────────────────────────────────────
+function buildSymbolTabs() {
+    const container = document.getElementById('symbol-tabs');
+    container.innerHTML = '';
+    state.watchlist.forEach(sym => {
+        const btn = document.createElement('button');
+        btn.className = `tab-btn ${sym === state.symbol ? 'active' : ''}`;
+        btn.textContent = sym.replace('USDT', '');
+        btn.dataset.full = sym;
+        btn.onclick = () => selectSymbol(sym);
+        container.appendChild(btn);
+    });
+}
 
-        const activeCount = Object.values(data.active_trades).reduce((acc, curr) => acc + curr.length, 0);
+function selectSymbol(sym) {
+    if (sym === state.symbol) return;
+    state.symbol = sym;
+    document.querySelectorAll('.tab-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.full === sym);
+    });
+    // Clear stale price immediately while new data loads.
+    document.getElementById('val-live-price').textContent = '—';
+    refreshChart();
+}
+
+// ─── Full refresh (sidebar + chart) ───────────────────────────────────────────
+async function refresh() {
+    await Promise.all([refreshSidebar(), refreshChart()]);
+}
+
+// ─── Sidebar: metrics + trade list ────────────────────────────────────────────
+async function refreshSidebar() {
+    try {
+        const [stateData, tradesData] = await Promise.all([
+            fetch('/api/state').then(r => r.json()),
+            fetch('/api/trades').then(r => r.json()),
+        ]);
+
+        // Metrics.
+        document.getElementById('val-balance').textContent = formatUSD(stateData.balance);
+
+        const dailyPnL = parseFloat(stateData.daily_pnl) || 0;
+        const dailyEl = document.getElementById('val-daily-pnl');
+        dailyEl.textContent = `Daily PnL: ${formatUSD(dailyPnL)}`;
+        dailyEl.className = `metric-subtitle ${dailyPnL >= 0 ? 'positive' : 'negative'}`;
+
+        const total = (stateData.total_wins || 0) + (stateData.total_losses || 0);
+        const winRate = total > 0 ? (stateData.total_wins / total) * 100 : 0;
+        const winEl = document.getElementById('val-winrate');
+        winEl.textContent = formatPct(winRate);
+        winEl.className = `metric-value ${winRate >= 50 ? 'positive' : 'negative'}`;
+
+        const activeCount = Object.values(stateData.active_trades || {})
+            .reduce((n, arr) => n + arr.length, 0);
         document.getElementById('val-active').textContent = activeCount;
 
         const statusEl = document.getElementById('val-status');
-        if (data.trading_enabled) {
-            statusEl.textContent = 'ACTIVE';
-            statusEl.className = 'metric-value positive';
-        } else {
-            statusEl.textContent = 'SUSPENDED';
-            statusEl.className = 'metric-value negative';
-        }
+        const enabled = stateData.trading_enabled;
+        statusEl.textContent = enabled ? 'ACTIVE' : 'SUSPENDED';
+        statusEl.className = `metric-value ${enabled ? 'positive' : 'negative'}`;
 
-        // --- Build Multisymbol Summary Table ---
-        const summaryBody = document.getElementById('summary-body');
-        summaryBody.innerHTML = '';
-        
-        const allSymbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
-        
-        allSymbols.forEach(sym => {
-            // Calculate stats for this symbol
-            const completed = data.completed.filter(t => t.symbol === sym);
-            const active = (data.active_trades[sym] || []).length;
-            const wins = completed.filter(t => t.status === 'WIN').length;
-            const losses = completed.filter(t => t.status === 'LOSS').length;
-            const pnl = completed.reduce((acc, t) => acc + parseFloat(t.pnl), 0);
-            const winRate = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';
+        // Recent trades list.
+        buildTradeList(tradesData);
 
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td class="sym-col">${sym}</td>
-                <td>${completed.length + active}</td>
-                <td>${wins}</td>
-                <td>${losses}</td>
-                <td class="${winRate >= 50 ? 'positive' : 'negative'}">${winRate}%</td>
-                <td class="${pnl >= 0 ? 'positive' : 'negative'}">${formatCurrency(pnl)}</td>
-                <td><span class="status-active">${active > 0 ? 'TRADING' : 'IDLE'}</span></td>
-            `;
-            summaryBody.appendChild(row);
-        });
+        // Summary table.
+        buildSummaryTable(stateData);
 
-        // Build symbol selector badges if first load
-        const badgeContainer = document.getElementById('symbol-badges');
-        if (badgeContainer.children.length === 0) {
-            allSymbols.forEach(sym => {
-                const el = document.createElement('div');
-                el.className = `symbol-badge ${sym === state.symbol ? 'active' : ''}`;
-                el.textContent = sym;
-                el.onclick = () => {
-                    document.querySelectorAll('.symbol-badge').forEach(b => b.classList.remove('active'));
-                    el.classList.add('active');
-                    state.symbol = sym;
-                    loadChartData(sym);
-                };
-                badgeContainer.appendChild(el);
+    } catch (e) {
+        console.error('Sidebar refresh failed:', e);
+    }
+}
+
+function buildTradeList(data) {
+    const list = document.getElementById('trades-list');
+    list.innerHTML = '';
+
+    const active    = Object.values(data.active || {}).flat();
+    const completed = data.completed || [];
+    const all = [...active, ...completed]
+        .sort((a, b) => new Date(b.time) - new Date(a.time))
+        .slice(0, 40);
+
+    // Rebuild trade markers for the active symbol while we're here.
+    state.tradeMarkers = [];
+
+    all.forEach(t => {
+        const isWin    = t.status === 'WIN';
+        const isLoss   = t.status === 'LOSS';
+        const isActive = t.status === 'ACTIVE';
+
+        // Sidebar item.
+        const el = document.createElement('div');
+        el.className = `trade-item ${isWin ? 'win' : isLoss ? 'loss' : 'active'}`;
+        const pnlText = isActive ? 'Open' : formatUSD(t.pnl);
+        const timeStr = new Date(t.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        el.innerHTML = `
+            <div class="trade-header">
+                <span class="trade-symbol">${t.symbol}</span>
+                <span class="trade-dir ${t.direction.toLowerCase()}">${t.direction}</span>
+            </div>
+            <div class="trade-meta">
+                <span class="trade-time">${timeStr}</span>
+                <span class="trade-pnl ${isWin ? 'positive' : isLoss ? 'negative' : ''}">${pnlText}</span>
+            </div>`;
+        list.appendChild(el);
+
+        // Collect EXEC markers for the current symbol.
+        if (t.symbol === state.symbol) {
+            state.tradeMarkers.push({
+                time:     snapMinute(new Date(t.time).getTime() / 1000),
+                position: t.direction === 'BUY' ? 'belowBar' : 'aboveBar',
+                color:    t.direction === 'BUY' ? '#3b82f6' : '#f97316',
+                shape:    t.direction === 'BUY' ? 'arrowUp' : 'arrowDown',
+                text:     `EXEC ${t.direction}`,
             });
         }
-    } catch (e) {
-        console.error('Failed to update state:', e);
-    }
+    });
 }
 
-async function updateTrades() {
-    try {
-        const res = await fetch('/api/trades');
-        const data = await res.json();
-        
-        const list = document.getElementById('trades-list');
-        list.innerHTML = '';
+function buildSummaryTable(data) {
+    const tbody = document.getElementById('summary-body');
+    tbody.innerHTML = '';
 
-        let allTrades = [];
-        Object.values(data.active || {}).forEach(arr => allTrades.push(...arr));
-        allTrades.push(...(data.completed || []));
-        
-        // Fix new Date() by ensuring we have a valid timestamp string or number
-        allTrades.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+    state.watchlist.forEach(sym => {
+        const completed = (data.completed || []).filter(t => t.symbol === sym);
+        const active    = (data.active_trades?.[sym] || []).length;
+        const wins      = completed.filter(t => t.status === 'WIN').length;
+        const losses    = completed.filter(t => t.status === 'LOSS').length;
+        const pnl       = completed.reduce((s, t) => s + parseFloat(t.pnl || 0), 0);
+        const wr        = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '—';
 
-        // We'll collect all markers here
-        state.tradeMarkers = [];
-
-        // Add Recent Trades to sidebar
-        allTrades.slice(0, 50).forEach(t => {
-            const isWin = t.status === 'WIN';
-            const isLoss = t.status === 'LOSS';
-            const isActive = t.status === 'ACTIVE';
-
-            const el = document.createElement('div');
-            el.className = `trade-item ${isWin ? 'win' : isLoss ? 'loss' : 'active'}`;
-            
-            const pnlClass = isWin ? 'positive' : isLoss ? 'negative' : '';
-            const pnlText = isActive ? 'Open' : formatCurrency(t.pnl);
-
-            const tradeTime = new Date(t.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-            el.innerHTML = `
-                <div class="trade-header">
-                    <div>
-                        <span class="trade-symbol">${t.symbol}</span>
-                        <span class="trade-time">${tradeTime}</span>
-                    </div>
-                    <span class="trade-dir ${t.direction.toLowerCase()}">${t.direction}</span>
-                </div>
-                <div class="trade-details">
-                    <span>${parseFloat(t.entry_price).toFixed(2)} &rarr; ${isActive ? '-' : parseFloat(t.exit_price).toFixed(2)}</span>
-                    <span class="trade-pnl ${pnlClass}">${pnlText}</span>
-                </div>
-            `;
-            list.appendChild(el);
-
-            // Chart markers for trades only if they match current symbol
-            if (t.symbol === state.symbol) {
-                const markerTime = snapToMinute(new Date(t.time).getTime() / 1000);
-                
-                state.tradeMarkers.push({
-                    time: markerTime,
-                    position: t.direction === 'BUY' ? 'belowBar' : 'aboveBar',
-                    color: t.direction === 'BUY' ? '#3b82f6' : '#ef4444',
-                    shape: t.direction === 'BUY' ? 'arrowUp' : 'arrowDown',
-                    text: `EXEC: ${t.direction}`
-                });
-            }
-        });
-
-    } catch (e) {
-        console.error('Failed to update trades:', e);
-    }
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td class="sym-col">${sym}</td>
+            <td>${completed.length + active}</td>
+            <td class="positive">${wins}</td>
+            <td class="negative">${losses}</td>
+            <td class="${parseFloat(wr) >= 50 ? 'positive' : (wr === '—' ? '' : 'negative')}">${wr !== '—' ? wr + '%' : '—'}</td>
+            <td class="${pnl >= 0 ? 'positive' : 'negative'}">${formatUSD(pnl)}</td>
+            <td>${active > 0 ? '<span class="badge-trading">TRADING</span>' : '<span class="badge-idle">IDLE</span>'}</td>`;
+        tbody.appendChild(tr);
+    });
 }
 
-async function loadChartData(symbol) {
+// ─── Chart: candles + markers ─────────────────────────────────────────────────
+async function refreshChart() {
+    if (!state.symbol || !state.candleSeries) return;
     try {
-        // 1. Fetch Candles
-        const candleRes = await fetch(`/api/candles?symbol=${symbol}`);
-        const candleData = await candleRes.json();
-        if (!candleData || candleData.length === 0) return;
+        const [candleData, signals] = await Promise.all([
+            fetch(`/api/candles?symbol=${state.symbol}`).then(r => r.json()),
+            fetch(`/api/signals?symbol=${state.symbol}`).then(r => r.json()),
+        ]);
 
+        if (!candleData?.length) return;
+
+        // Build chart-ready candles.
         const chartData = candleData
-            .filter(d => d.open !== "0")
+            .filter(d => d.open !== '0' && d.open !== 0)
             .map(d => ({
-                time: snapToMinute(new Date(d.timestamp).getTime() / 1000),
-                open: parseFloat(d.open),
-                high: parseFloat(d.high),
-                low: parseFloat(d.low),
+                time:  snapMinute(new Date(d.timestamp).getTime() / 1000),
+                open:  parseFloat(d.open),
+                high:  parseFloat(d.high),
+                low:   parseFloat(d.low),
                 close: parseFloat(d.close),
             }))
             .sort((a, b) => a.time - b.time);
 
-        if (chartData.length > 0) {
-            // Set historical data once, then update the last candle
-            state.candleSeries.setData(chartData.slice(0, -1));
-            state.candleSeries.update(chartData[chartData.length - 1]);
-        }
+        if (chartData.length === 0) return;
 
-        // 2. Fetch Model Predictions (Signals)
-        const signalRes = await fetch(`/api/signals?symbol=${symbol}`);
-        const signals = await signalRes.json();
+        // Feed historical data then live-update the last (forming) candle.
+        state.candleSeries.setData(chartData.slice(0, -1));
+        state.candleSeries.update(chartData.at(-1));
 
-        // Create price lines for TP/SL targets
-        if (state.priceLines) {
-            state.priceLines.forEach(l => state.candleSeries.removePriceLine(l));
-        }
+        // ── TP/SL lines: only the most recent signal ─────────────────────────
+        state.priceLines.forEach(l => { try { state.candleSeries.removePriceLine(l); } catch {} });
         state.priceLines = [];
 
-        // Add prediction markers & target lines
-        const predictionMarkers = signals.map(s => {
-            const time = snapToMinute(new Date(s.timestamp).getTime() / 1000);
-            
-            // Only add lines for recent/relevant signals to avoid clutter
-            // For this demo, we add them for all visible signals
-            if (s.tp && s.sl) {
-                const tpLine = state.candleSeries.createPriceLine({
-                    price: parseFloat(s.tp),
-                    color: '#10b981',
-                    lineWidth: 1,
-                    lineStyle: LightweightCharts.LineStyle.Dashed,
-                    axisLabelVisible: true,
-                    title: `TP: ${s.direction}`,
-                });
-                const slLine = state.candleSeries.createPriceLine({
-                    price: parseFloat(s.sl),
-                    color: '#ef4444',
-                    lineWidth: 1,
-                    lineStyle: LightweightCharts.LineStyle.Dashed,
-                    axisLabelVisible: true,
-                    title: `SL: ${s.direction}`,
-                });
-                state.priceLines.push(tpLine, slLine);
-            }
+        const latestSignal = signals?.at(-1);
+        if (latestSignal?.tp && latestSignal?.sl) {
+            const tp = parseFloat(latestSignal.tp);
+            const sl = parseFloat(latestSignal.sl);
+            if (tp > 0) state.priceLines.push(state.candleSeries.createPriceLine({
+                price: tp, color: '#10b981', lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true, title: `TP`,
+            }));
+            if (sl > 0) state.priceLines.push(state.candleSeries.createPriceLine({
+                price: sl, color: '#ef4444', lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true, title: `SL`,
+            }));
+        }
 
-            return {
-                time: time,
-                position: 'inBar',
-                color: 'rgba(255, 255, 255, 0.3)',
-                shape: 'circle',
-                text: `PREDICT: ${s.direction}`
-            };
-        });
+        // ── Prediction markers: last 20, subtle style ────────────────────────
+        const recentSignals = (signals || []).slice(-20);
+        const predMarkers = recentSignals.map(s => ({
+            time:     snapMinute(new Date(s.timestamp).getTime() / 1000),
+            position: s.direction === 'BUY' ? 'belowBar' : 'aboveBar',
+            color:    'rgba(148, 163, 184, 0.25)',
+            shape:    'circle',
+            size:     0,
+            text:     '',
+        }));
 
-        // Combine and set all markers
-        const allMarkers = [...state.tradeMarkers, ...predictionMarkers]
+        // Combine EXEC + prediction markers, dedup by time (EXEC takes priority).
+        const execTimes = new Set(state.tradeMarkers.map(m => m.time));
+        const filteredPred = predMarkers.filter(m => !execTimes.has(m.time));
+        const allMarkers = [...filteredPred, ...state.tradeMarkers]
             .sort((a, b) => a.time - b.time);
 
         state.candleSeries.setMarkers(allMarkers);
 
-        const currentPrice = chartData[chartData.length - 1].close;
-        document.getElementById('chart-legend').textContent = `${symbol} • ${formatCurrency(currentPrice)}`;
-        document.getElementById('val-last-update').textContent = `Last Updated: ${new Date().toLocaleTimeString()}`;
+        // ── Header info ───────────────────────────────────────────────────────
+        const last = chartData.at(-1);
+        const prev = chartData.at(-2);
+        const change = prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+        const sign   = change >= 0 ? '+' : '';
+
+        document.getElementById('val-live-price').textContent = formatUSD(last.close);
+        const chEl = document.getElementById('val-price-change');
+        chEl.textContent = `${sign}${change.toFixed(2)}%`;
+        chEl.className   = `price-change ${change >= 0 ? 'positive' : 'negative'}`;
+        document.getElementById('val-last-update').textContent =
+            `Updated ${new Date().toLocaleTimeString()}`;
 
     } catch (e) {
-        console.error('Failed to load chart data:', e);
+        console.error('Chart refresh failed:', e);
     }
 }
 

@@ -3,156 +3,154 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kryptic Gopha Dashboard</title>
-    <!-- TradingView Lightweight Charts (Pinned v4.1.1) -->
+    <title>Kryptic Gopha</title>
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-    <link rel="stylesheet" href="style.css">
-    <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="app-container">
-        <!-- Sidebar -->
-        <aside class="sidebar">
+<div class="app-container">
+
+    <!-- ── Sidebar ──────────────────────────────────────────────────── -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
             <div class="logo">
-                <div class="logo-icon">⛏️</div>
+                <span class="logo-icon">⛏️</span>
                 <h1>Kryptic Gopha</h1>
             </div>
-            
+        </div>
+
+        <div class="metrics-section">
             <div class="metrics-grid">
                 <div class="metric-card">
                     <div class="metric-label">Balance</div>
-                    <div class="metric-value" id="val-balance">$0.00</div>
-                    <div class="metric-subtitle" id="val-daily-pnl">Daily PnL: $0.00</div>
+                    <div class="metric-value" id="val-balance">—</div>
+                    <div class="metric-subtitle" id="val-daily-pnl">Daily PnL: —</div>
                 </div>
-                
                 <div class="metric-card">
                     <div class="metric-label">Win Rate</div>
-                    <div class="metric-value" id="val-winrate">0.0%</div>
-                    <div class="metric-subtitle">Target: 85-99%</div>
+                    <div class="metric-value" id="val-winrate">—</div>
+                    <div class="metric-subtitle">Target: 55%+</div>
                 </div>
-                
                 <div class="metric-card">
                     <div class="metric-label">Active Trades</div>
-                    <div class="metric-value" id="val-active">0</div>
-                    <div class="metric-subtitle">Max Allowed: 5</div>
+                    <div class="metric-value" id="val-active">—</div>
+                    <div class="metric-subtitle">Open positions</div>
                 </div>
-                
                 <div class="metric-card">
-                    <div class="metric-label">Circuit Breaker</div>
-                    <div class="metric-value" id="val-status">ACTIVE</div>
-                    <div class="metric-subtitle">Status</div>
+                    <div class="metric-label">Status</div>
+                    <div class="metric-value" id="val-status">—</div>
+                    <div class="metric-subtitle">Circuit breaker</div>
                 </div>
             </div>
-            
-            <div class="recent-trades">
-                <h3>Recent Trades</h3>
-                <div id="trades-list" class="trades-list">
-                    <!-- Populated by JS -->
-                </div>
-            </div>
-        </aside>
+        </div>
 
-        <!-- Main Content (Chart) -->
-        <main class="main-content">
-            <header class="chart-header">
-                <div class="symbol-selector" id="symbol-badges">
-                    <!-- Populated by JS -->
+        <div class="trades-section">
+            <h3>Recent Trades</h3>
+            <div id="trades-list" class="trades-list"></div>
+        </div>
+    </aside>
+
+    <!-- ── Main ─────────────────────────────────────────────────────── -->
+    <main class="main-content">
+
+        <!-- Chart header -->
+        <header class="chart-header">
+            <div class="symbol-tabs" id="symbol-tabs">
+                <!-- Populated by JS from /health watchlist -->
+            </div>
+
+            <div class="price-ticker">
+                <span id="val-live-price">—</span>
+                <span class="price-change" id="val-price-change"></span>
+            </div>
+
+            <div class="header-spacer"></div>
+
+            <div class="update-info">
+                <span id="val-last-update"></span>
+                <button class="btn-legend" id="btn-legend">💡 Legend</button>
+            </div>
+        </header>
+
+        <!-- Legend overlay -->
+        <div class="legend-overlay" id="legend-modal" style="display:none;">
+            <div class="legend-content">
+                <div class="legend-header">
+                    <h3>Chart Reference</h3>
+                    <button class="close-btn" id="close-legend">&times;</button>
                 </div>
-                <div class="chart-legend" id="chart-legend">
-                    Loading data...
-                </div>
-                <div class="update-info">
-                    <span id="val-last-update">Last Updated: --:--:--</span>
-                    <button id="btn-legend" class="btn-icon">💡 Legend</button>
-                </div>
-            </header>
-            
-            <div class="legend-overlay" id="legend-modal" style="display: none;">
-                <div class="legend-content">
-                    <div class="legend-header">
-                        <h3>Indicator Quick Reference</h3>
-                        <button class="close-btn" id="close-legend">&times;</button>
-                    </div>
-                    <div class="legend-body">
-                        <div class="legend-item">
-                            <span class="marker buy">▲</span>
-                            <div>
-                                <strong>EXEC: BUY</strong>
-                                <p>Signal executed as a LONG position. Triggered by EMA convergence + RSI oversold.</p>
-                            </div>
-                        </div>
-                        <div class="legend-item">
-                            <span class="marker sell">▼</span>
-                            <div>
-                                <strong>EXEC: SELL</strong>
-                                <p>Signal executed as a SHORT position. Triggered by EMA crossover + RSI overbought.</p>
-                            </div>
-                        </div>
-                        <div class="legend-item">
-                            <span class="marker predict">○</span>
-                            <div>
-                                <strong>PREDICT: SIGNAL</strong>
-                                <p>Model generated a prediction, but execution was skipped (e.g. trend bias filter or risk limit).</p>
-                            </div>
-                        </div>
-                        <div class="legend-item">
-                            <span class="marker chart-candle">🕯️</span>
-                            <div>
-                                <strong>Candlesticks</strong>
-                                <p>OHLC minute-aggregate price action. Green = Bullish, Red = Bearish.</p>
-                            </div>
-                        </div>
-                        <div class="legend-item">
-                            <span class="marker tp-line">- - -</span>
-                            <div>
-                                <strong>TP: TARGET PROFIT</strong>
-                                <p>Green dashed line. The model's predicted exit point for a winning trade.</p>
-                            </div>
-                        </div>
-                        <div class="legend-item">
-                            <span class="marker sl-line">- - -</span>
-                            <div>
-                                <strong>SL: STOP LOSS</strong>
-                                <p>Red dashed line. The model's predicted boundary for a losing trade.</p>
-                            </div>
-                        </div>
+
+                <div class="legend-item">
+                    <div class="legend-icon buy">▲</div>
+                    <div class="legend-text">
+                        <strong>EXEC BUY</strong>
+                        <p>Long position executed. Triggered by EMA convergence + RSI oversold + macro trend.</p>
                     </div>
                 </div>
-            </div>
-            
-            <div class="chart-container" id="chart">
-                <!-- Lightweight chart injected here -->
-            </div>
 
-            <!-- Multisymbol Summary -->
-            <section class="summary-section">
-                <div class="section-header">
-                    <h2>Market Performance Overview</h2>
-                    <span class="badge">Session Stats</span>
+                <div class="legend-item">
+                    <div class="legend-icon sell">▼</div>
+                    <div class="legend-text">
+                        <strong>EXEC SELL</strong>
+                        <p>Short position executed. Triggered by EMA crossover + RSI overbought + macro trend.</p>
+                    </div>
                 </div>
-                <div class="table-card">
-                    <table class="summary-table">
-                        <thead>
-                            <tr>
-                                <th>Symbol</th>
-                                <th>Trades</th>
-                                <th>Wins</th>
-                                <th>Losses</th>
-                                <th>Win Rate</th>
-                                <th>Total PnL</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="summary-body">
-                            <!-- Populated by JS -->
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-        </main>
-    </div>
 
-    <script src="app.js"></script>
+                <div class="legend-item">
+                    <div class="legend-icon pred">●</div>
+                    <div class="legend-text">
+                        <strong>Signal (not executed)</strong>
+                        <p>Strategy generated a prediction but execution was filtered (risk limit, trend bias, etc).</p>
+                    </div>
+                </div>
+
+                <div class="legend-item">
+                    <div class="legend-icon tp">- -</div>
+                    <div class="legend-text">
+                        <strong>Take Profit</strong>
+                        <p>Green dashed line — target exit price for the latest active signal.</p>
+                    </div>
+                </div>
+
+                <div class="legend-item">
+                    <div class="legend-icon sl">- -</div>
+                    <div class="legend-text">
+                        <strong>Stop Loss</strong>
+                        <p>Red dashed line — maximum acceptable loss boundary for the latest active signal.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Candlestick chart -->
+        <div class="chart-container" id="chart"></div>
+
+        <!-- Per-symbol summary table -->
+        <section class="summary-section">
+            <div class="summary-header">
+                <h2>Session Overview</h2>
+                <span class="badge-session">All Symbols</span>
+            </div>
+            <table class="summary-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Trades</th>
+                        <th>Wins</th>
+                        <th>Losses</th>
+                        <th>Win Rate</th>
+                        <th>Total PnL</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="summary-body"></tbody>
+            </table>
+        </section>
+
+    </main>
+</div>
+
+<script src="app.js"></script>
 </body>
 </html>
