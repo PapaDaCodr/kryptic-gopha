@@ -358,6 +358,65 @@ func (p *PaperTrader) GetStats() TraderStats {
 	}
 }
 
+// GetState returns a locked snapshot of the full trader state for the /api/state endpoint.
+func (p *PaperTrader) GetState() TraderState {
+	p.Lock()
+	defer p.Unlock()
+
+	// Deep copy active trades so the caller holds a stable snapshot.
+	activeCopy := make(map[string][]*Trade, len(p.ActiveTrades))
+	for sym, trades := range p.ActiveTrades {
+		cp := make([]*Trade, len(trades))
+		copy(cp, trades)
+		activeCopy[sym] = cp
+	}
+	completedCopy := make([]Trade, len(p.Completed))
+	copy(completedCopy, p.Completed)
+
+	return TraderState{
+		Balance:        p.Balance,
+		InitialBalance: p.InitialBalance,
+		DailyPnL:       p.DailyPnL,
+		TotalWins:      p.TotalWins,
+		TotalLosses:    p.TotalLosses,
+		TradingEnabled: p.TradingEnabled,
+		ActiveTrades:   activeCopy,
+		Completed:      completedCopy,
+	}
+}
+
+// GetTrades returns a locked snapshot of active and completed trades for /api/trades.
+func (p *PaperTrader) GetTrades() TradesSnapshot {
+	p.Lock()
+	defer p.Unlock()
+
+	activeCopy := make(map[string][]*Trade, len(p.ActiveTrades))
+	for sym, trades := range p.ActiveTrades {
+		cp := make([]*Trade, len(trades))
+		copy(cp, trades)
+		activeCopy[sym] = cp
+	}
+	completedCopy := make([]Trade, len(p.Completed))
+	copy(completedCopy, p.Completed)
+
+	return TradesSnapshot{Active: activeCopy, Completed: completedCopy}
+}
+
+// SetTradingEnabled suspends or resumes trading (used by Telegram /stop command).
+func (p *PaperTrader) SetTradingEnabled(enabled bool) {
+	p.Lock()
+	defer p.Unlock()
+	p.TradingEnabled = enabled
+}
+
+// SetBalance replaces balance and resets the initial balance baseline.
+func (p *PaperTrader) SetBalance(bal decimal.Decimal) {
+	p.Lock()
+	defer p.Unlock()
+	p.Balance = bal
+	p.InitialBalance = bal
+}
+
 func (p *PaperTrader) SaveState(filename string) error {
 	p.Lock()
 	defer p.Unlock()
