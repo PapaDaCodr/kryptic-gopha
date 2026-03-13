@@ -23,10 +23,10 @@ type EngineManager struct {
 	states   map[string]*symbolState
 	Strategy Strategy
 	Signals  chan models.Signal
-	Trader   *PaperTrader
+	Trader   Trader
 }
 
-func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trader *PaperTrader) *EngineManager {
+func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trader Trader) *EngineManager {
 	mgr := &EngineManager{
 		states:   make(map[string]*symbolState),
 		Strategy: strategy,
