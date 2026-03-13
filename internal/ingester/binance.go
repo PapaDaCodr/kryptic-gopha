@@ -26,12 +26,20 @@ const (
 	writeTimeout           = 10 * time.Second
 )
 
+// klineCloseIdx is the index of the close price in a Binance kline array.
+// klineCloseTimeIdx is the index of the candle close time (Unix ms).
+const (
+	klineCloseIdx     = 4
+	klineCloseTimeIdx = 6
+	klineMinLen       = 7
+)
+
 func FetchHistoricalKlines(symbol, interval string, limit int) ([]models.MarketTick, error) {
 	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=%s&limit=%d", binanceRestURL, symbol, interval, limit)
-	
-	resp, err := http.Get(url)
+
+	resp, err := http.Get(url) //nolint:noctx // historical fetch; no streaming context needed
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binance klines request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -41,15 +49,29 @@ func FetchHistoricalKlines(symbol, interval string, limit int) ([]models.MarketT
 
 	var raw [][]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binance klines decode failed: %w", err)
 	}
 
 	ticks := make([]models.MarketTick, 0, len(raw))
-	for _, kline := range raw {
+	for i, kline := range raw {
+		if len(kline) < klineMinLen {
+			return nil, fmt.Errorf("kline[%d]: expected at least %d fields, got %d", i, klineMinLen, len(kline))
+		}
+
+		closePrice, ok := kline[klineCloseIdx].(string)
+		if !ok {
+			return nil, fmt.Errorf("kline[%d]: close price is not a string (got %T)", i, kline[klineCloseIdx])
+		}
+
+		closeTime, ok := kline[klineCloseTimeIdx].(float64)
+		if !ok {
+			return nil, fmt.Errorf("kline[%d]: close time is not a number (got %T)", i, kline[klineCloseTimeIdx])
+		}
+
 		ticks = append(ticks, models.MarketTick{
 			Symbol:    symbol,
-			Price:     kline[4].(string),
-			Timestamp: int64(kline[6].(float64)),
+			Price:     closePrice,
+			Timestamp: int64(closeTime),
 		})
 	}
 
