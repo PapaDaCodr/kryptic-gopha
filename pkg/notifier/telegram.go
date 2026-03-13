@@ -22,10 +22,15 @@ type Notifier interface {
 	StartListening(ctx context.Context, handler CommandHandler)
 }
 
+// longPollTimeout is the server-side wait duration passed to Telegram getUpdates.
+// The pollClient timeout must exceed this value.
+const longPollTimeout = 30
+
 // TelegramNotifier sends messages via a Telegram Bot.
 type TelegramNotifier struct {
-	Token    string
-	ChatID   string
+	Token   string
+	ChatID  string
+	apiBase string // base URL; defaults to https://api.telegram.org
 	// client is used for short outbound requests (sendMessage, etc.).
 	client *http.Client
 	// pollClient is used exclusively for long-poll getUpdates calls.
@@ -34,14 +39,11 @@ type TelegramNotifier struct {
 	updateID   int
 }
 
-// longPollTimeout is the server-side wait duration passed to Telegram getUpdates.
-// The pollClient timeout must exceed this value.
-const longPollTimeout = 30
-
 func NewTelegramNotifier(token, chatID string) *TelegramNotifier {
 	return &TelegramNotifier{
 		Token:      token,
 		ChatID:     chatID,
+		apiBase:    "https://api.telegram.org",
 		client:     &http.Client{Timeout: 5 * time.Second},
 		pollClient: &http.Client{Timeout: (longPollTimeout + 5) * time.Second},
 	}
@@ -54,7 +56,7 @@ func (t *TelegramNotifier) Notify(message string) {
 	}
 
 	go func() {
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.Token)
+		url := fmt.Sprintf("%s/bot%s/sendMessage", t.apiBase, t.Token)
 		payload := map[string]string{
 			"chat_id":    t.ChatID,
 			"text":       message,
@@ -76,7 +78,6 @@ func (t *TelegramNotifier) Notify(message string) {
 }
 
 // StartListening polls Telegram for commands until ctx is cancelled.
-// It must be called in a goroutine or the caller must not block on it.
 func (t *TelegramNotifier) StartListening(ctx context.Context, handler CommandHandler) {
 	if t.Token == "" {
 		return
@@ -92,14 +93,13 @@ func (t *TelegramNotifier) StartListening(ctx context.Context, handler CommandHa
 			}
 
 			url := fmt.Sprintf(
-				"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=%d",
-				t.Token, t.updateID+1, longPollTimeout,
+				"%s/bot%s/getUpdates?offset=%d&timeout=%d",
+				t.apiBase, t.Token, t.updateID+1, longPollTimeout,
 			)
 
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
-				// ctx was cancelled while building the request
-				return
+				return // ctx was cancelled while building the request
 			}
 
 			resp, err := t.pollClient.Do(req)
