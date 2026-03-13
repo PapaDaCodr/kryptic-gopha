@@ -14,6 +14,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/papadacodr/kryptic-gopha/internal/engine"
+	"github.com/papadacodr/kryptic-gopha/internal/exchange"
 	"github.com/papadacodr/kryptic-gopha/internal/ingester"
 	"github.com/papadacodr/kryptic-gopha/pkg/notifier"
 	"github.com/rs/zerolog"
@@ -52,21 +53,54 @@ func main() {
 		getEnvInt("RSI_PERIOD", 14),
 	)
 
-	trader := engine.NewPaperTrader(getEnvFloat("INITIAL_BALANCE", 10000.0))
-	trader.TP = getEnvDecimal("TP", "0.05") // 5% Take Profit (high ROI target)
-	trader.SL = getEnvDecimal("SL", "0.02") // 2% Fixed Stop-Loss
-	trader.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.02") // 2% Risk
-	trader.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.06") // 6% Daily Loss Circuit Breaker
-	trader.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
-	trader.TrailingSL = os.Getenv("TRAILING_SL") != "false" // Enabled by default
-	trader.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.015") // 1.5% trailing stop to capture big moves
+	// 2b. Select paper or live trading mode.
+	var trader engine.Trader
+	tradingMode := os.Getenv("TRADING_MODE") // "paper" (default) or "live"
 
-	// 2b. Telegram Notifications
+	if tradingMode == "live" {
+		apiKey := os.Getenv("BINANCE_API_KEY")
+		apiSecret := os.Getenv("BINANCE_API_SECRET")
+		if apiKey == "" || apiSecret == "" {
+			log.Fatal().Msg("TRADING_MODE=live requires BINANCE_API_KEY and BINANCE_API_SECRET")
+		}
+		exClient := exchange.NewClient(apiKey, apiSecret)
+		lt := engine.NewLiveTrader(exClient, getEnvFloat("INITIAL_BALANCE", 1000.0))
+		lt.TP = getEnvDecimal("TP", "0.005")
+		lt.SL = getEnvDecimal("SL", "0.003")
+		lt.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.01")
+		lt.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.05")
+		lt.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 3)
+		lt.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.003")
+		if err := lt.SyncBalance(); err != nil {
+			log.Warn().Err(err).Msg("Could not sync live balance; using fallback")
+		}
+		trader = lt
+		log.Info().Msg("Trading mode: LIVE (Binance USDT-M Futures)")
+	} else {
+		pt := engine.NewPaperTrader(getEnvFloat("INITIAL_BALANCE", 10000.0))
+		pt.TP = getEnvDecimal("TP", "0.05")
+		pt.SL = getEnvDecimal("SL", "0.02")
+		pt.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.02")
+		pt.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.06")
+		pt.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
+		pt.TrailingSL = os.Getenv("TRAILING_SL") != "false"
+		pt.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.015")
+		trader = pt
+		log.Info().Msg("Trading mode: PAPER (simulation)")
+	}
+
+	// 2c. Telegram Notifications
 	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	tgChatID := os.Getenv("TELEGRAM_CHAT_ID")
 	if tgToken != "" && tgChatID != "" {
 		tgNotifier := notifier.NewTelegramNotifier(tgToken, tgChatID)
-		trader.Notifier = tgNotifier
+		// Wire notifier to the concrete trader type.
+		switch t := trader.(type) {
+		case *engine.PaperTrader:
+			t.Notifier = tgNotifier
+		case *engine.LiveTrader:
+			t.Notifier = tgNotifier
+		}
 		log.Info().Msg("Telegram notifications enabled")
 		
 		// Start listening for commands; ctx cancellation stops the goroutine.
@@ -115,18 +149,27 @@ func main() {
 		log.Warn().Msg("Telegram not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable.")
 	}
 
-	// 3. Load previous state if exists
+	// 3. Load previous state if exists; re-apply env config so .env always wins.
 	if _, err := os.Stat(stateFile); err == nil {
 		if err := trader.LoadState(stateFile); err != nil {
 			log.Warn().Err(err).Msg("Failed to load state file")
 		} else {
 			log.Info().Msg("Previous state loaded successfully")
-			// RE-APPLY CONFIG OVERRIDES (State loads old params, we want .env to win)
-			trader.TP = getEnvDecimal("TP", "0.05")
-			trader.SL = getEnvDecimal("SL", "0.02")
-			trader.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.015")
-			trader.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.02")
-			trader.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
+			// Re-apply risk config after state restore (LoadState overwrites fields).
+			switch t := trader.(type) {
+			case *engine.PaperTrader:
+				t.TP = getEnvDecimal("TP", "0.05")
+				t.SL = getEnvDecimal("SL", "0.02")
+				t.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.015")
+				t.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.02")
+				t.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
+			case *engine.LiveTrader:
+				t.TP = getEnvDecimal("TP", "0.005")
+				t.SL = getEnvDecimal("SL", "0.003")
+				t.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.003")
+				t.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.01")
+				t.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 3)
+			}
 		}
 	}
 
@@ -198,7 +241,7 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		stats := trader.GetStats()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]any{
 			"status":        "OK",
 			"watchlist":     watchlist,
 			"total_signals": stats.TotalSignals,
