@@ -36,3 +36,4 @@ bin/
 # Tooling
 .codacy/
 .github/instructions/
+.claude/
