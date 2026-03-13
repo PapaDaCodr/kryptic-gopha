@@ -2,7 +2,9 @@ package engine
 
 import (
 	"fmt"
+	"sync"
 	"time"
+
 	"github.com/papadacodr/kryptic-gopha/internal/models"
 	"github.com/shopspring/decimal"
 )
@@ -62,15 +64,19 @@ func (s *EMAStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.S
 	return nil
 }
 
-// EfficientMultiFactorStrategy uses caching to avoid redundant calculations
+// EfficientMultiFactorStrategy optimizes for high-frequency updates by maintaining
+// internal state for recursive calculations. This reduces indicator calculation
+// complexity from O(N) to O(1) per tick, where N is the lookback period.
+//
+// It is safe for concurrent use across multiple symbols.
 type EfficientMultiFactorStrategy struct {
 	ShortPeriod int
 	LongPeriod  int
 	RSIPeriod   int
-	MacroPeriod int // e.g. 200 EMA for Macro Trend Filter
-	
-	// State per symbol
-	lastEMA     map[string]map[int]decimal.Decimal // symbol -> period -> value
+	MacroPeriod int // Standard 200 EMA to filter counter-trend signals
+
+	mu          sync.Mutex
+	lastEMA     map[string]map[int]decimal.Decimal // symbol -> period -> lastValue
 	lastAvgGain map[string]decimal.Decimal
 	lastAvgLoss map[string]decimal.Decimal
 	initialized map[string]bool
@@ -81,7 +87,7 @@ func NewEfficientStrategy(short, long, rsi int) *EfficientMultiFactorStrategy {
 		ShortPeriod: short,
 		LongPeriod:  long,
 		RSIPeriod:   rsi,
-		MacroPeriod: 200, // Hardcoded standard for macro trend
+		MacroPeriod: 200,
 		lastEMA:     make(map[string]map[int]decimal.Decimal),
 		lastAvgGain: make(map[string]decimal.Decimal),
 		lastAvgLoss: make(map[string]decimal.Decimal),
@@ -90,7 +96,9 @@ func NewEfficientStrategy(short, long, rsi int) *EfficientMultiFactorStrategy {
 }
 
 func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.Signal {
-	// We need enough data for the Macro Period (200)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if len(prices) < s.MacroPeriod || len(prices) < s.RSIPeriod+1 {
 		return nil
 	}
