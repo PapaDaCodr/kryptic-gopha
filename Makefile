@@ -15,21 +15,21 @@ run: stop
 
 ## stop: Safely terminate the running bot
 stop:
-	@echo "🛑 Stopping $(BINARY_NAME) on port $(PORT)..."
+	@echo "Stopping $(BINARY_NAME) on port $(PORT)..."
 	@-fuser -k $(PORT)/tcp > /dev/null 2>&1 || true
-	@echo "✅ Cleanup complete."
+	@echo "Cleanup complete."
 
 ## restart: Restart the engine
 restart: stop run
 
 ## build: Compile the binary
 build:
-	@echo "🔨 Building $(BINARY_NAME)..."
+	@echo " Building $(BINARY_NAME)..."
 	@go build -o $(BINARY_NAME) cmd/server/main.go
 
 ## clean: Remove binary and logs
 clean: stop
-	@echo "🧹 Cleaning up..."
+	@echo " Cleaning up..."
 	@rm -f $(BINARY_NAME)
 	@rm -f server.log
 	@echo "✅ Done."

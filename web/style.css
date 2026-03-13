@@ -1,133 +1,143 @@
+/* ── Design tokens ─────────────────────────────────────────────────────────── */
 :root {
-    --bg-dark: #0f111a;
-    --bg-card: #1a1d2d;
-    --text-main: #e2e8f0;
-    --text-muted: #94a3b8;
-    --accent: #3b82f6;
-    --success: #10b981;
-    --danger: #ef4444;
-    --border: #2dd4bf20;
+    --bg-dark:    #0f111a;
+    --bg-card:    #151929;
+    --bg-hover:   #1a1f33;
+    --text-main:  #e2e8f0;
+    --text-muted: #64748b;
+    --accent:     #3b82f6;
+    --success:    #10b981;
+    --danger:     #ef4444;
+    --warning:    #f59e0b;
+    --border:     rgba(30, 34, 53, 0.8);
+    --border-soft: rgba(255, 255, 255, 0.05);
+    --radius:     10px;
+    --radius-sm:  6px;
+    --shadow:     0 4px 24px rgba(0,0,0,0.4);
 }
 
-* {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-    font-family: 'Inter', sans-serif;
-}
-
+/* ── Reset ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body {
-    background-color: var(--bg-dark);
+    font-family: 'Inter', system-ui, sans-serif;
+    background: var(--bg-dark);
     color: var(--text-main);
     overflow: hidden;
-}
-
-.app-container {
-    display: flex;
     height: 100vh;
 }
 
-/* Sidebar */
+/* ── Layout ─────────────────────────────────────────────────────────────────── */
+.app-container {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────────────────── */
 .sidebar {
-    width: 320px;
-    background-color: var(--bg-card);
+    width: 300px;
+    min-width: 300px;
+    background: var(--bg-card);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
-    padding: 20px;
-    overflow-y: auto;
+    overflow: hidden;
+}
+
+.sidebar-header {
+    padding: 20px 20px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
 }
 
 .logo {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 30px;
+    gap: 10px;
 }
 
-.logo-icon {
-    font-size: 24px;
-    background: linear-gradient(135deg, var(--accent), #8b5cf6);
+.logo-icon { font-size: 22px; }
+.logo h1 {
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.4px;
+    background: linear-gradient(135deg, #e2e8f0, #94a3b8);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
-.logo h1 {
-    font-size: 20px;
-    font-weight: 700;
-    letter-spacing: -0.5px;
+/* ── Metrics ────────────────────────────────────────────────────────────────── */
+.metrics-section {
+    padding: 16px 20px;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
 }
 
-/* Metrics Grid */
 .metrics-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    margin-bottom: 30px;
-}
-
-.metric-card {
-    background-color: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    transition: transform 0.2s, background-color 0.2s;
-}
-
-.metric-card:hover {
-    transform: translateY(-2px);
-    background-color: rgba(255, 255, 255, 0.05);
-}
-
-.metric-label {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-    font-weight: 600;
-    margin-bottom: 8px;
-}
-
-.metric-value {
-    font-size: 18px;
-    font-weight: 700;
-    margin-bottom: 4px;
-}
-
-.metric-value.positive { color: var(--success); }
-.metric-value.negative { color: var(--danger); }
-
-.metric-subtitle {
-    font-size: 11px;
-    color: var(--text-muted);
-}
-
-/* Recent Trades */
-.recent-trades h3 {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-muted);
-    margin-bottom: 12px;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 8px;
-}
-
-.trades-list {
-    display: flex;
-    flex-direction: column;
     gap: 8px;
 }
 
-.trade-item {
-    background-color: rgba(255, 255, 255, 0.02);
-    border-radius: 8px;
-    padding: 12px;
-    border-left: 3px solid transparent;
+.metric-card {
+    background: var(--border-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
 }
 
-.trade-item.win { border-left-color: var(--success); }
+.metric-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.metric-value {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-main);
+    line-height: 1;
+    margin-bottom: 3px;
+}
+
+.metric-subtitle {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.positive { color: var(--success) !important; }
+.negative { color: var(--danger) !important; }
+
+/* ── Trades list ────────────────────────────────────────────────────────────── */
+.trades-section {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 20px 20px;
+}
+
+.trades-section h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.trades-list { display: flex; flex-direction: column; gap: 6px; }
+
+.trade-item {
+    background: var(--border-soft);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    border-left: 2px solid transparent;
+    transition: background 0.15s;
+}
+.trade-item:hover { background: var(--bg-hover); }
+.trade-item.win  { border-left-color: var(--success); }
 .trade-item.loss { border-left-color: var(--danger); }
 .trade-item.active { border-left-color: var(--accent); }
 
@@ -135,272 +145,271 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 4px;
+    margin-bottom: 3px;
 }
 
-.trade-symbol {
-    font-weight: 600;
-    font-size: 13px;
-}
+.trade-symbol { font-size: 12px; font-weight: 600; }
+.trade-dir { font-size: 10px; font-weight: 700; }
+.trade-dir.buy  { color: var(--success); }
+.trade-dir.sell { color: var(--danger); }
 
-.trade-time {
-    display: block;
-    font-size: 10px;
-    color: var(--text-muted);
-    margin-top: 2px;
-}
-
-.trade-dir.buy { color: var(--success); font-size: 11px; font-weight: 700; }
-.trade-dir.sell { color: var(--danger); font-size: 11px; font-weight: 700; }
-
-.trade-details {
+.trade-meta {
     display: flex;
     justify-content: space-between;
-    font-size: 12px;
-    color: var(--text-muted);
+    align-items: center;
 }
+.trade-time { font-size: 10px; color: var(--text-muted); }
+.trade-pnl  { font-size: 11px; font-weight: 600; color: var(--text-muted); }
 
-.trade-pnl {
-    font-weight: 600;
-}
-.trade-pnl.positive { color: var(--success); }
-.trade-pnl.negative { color: var(--danger); }
-
-/* Main Content */
+/* ── Main content ───────────────────────────────────────────────────────────── */
 .main-content {
     flex: 1;
     display: flex;
     flex-direction: column;
-    background-color: var(--bg-dark);
+    overflow: hidden;   /* critical: prevents summary from pushing chart off screen */
+    min-width: 0;
 }
 
+/* ── Chart header ───────────────────────────────────────────────────────────── */
 .chart-header {
-    height: 60px;
+    height: 52px;
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 0 24px;
+    gap: 16px;
+    padding: 0 20px;
+    flex-shrink: 0;
+    background: var(--bg-card);
 }
 
-.symbol-selector {
-    display: flex;
-    gap: 8px;
-}
+/* Symbol tabs */
+.symbol-tabs { display: flex; gap: 4px; }
 
-.symbol-badge {
-    padding: 6px 12px;
-    border-radius: 6px;
-    background-color: rgba(255, 255, 255, 0.05);
+.tab-btn {
+    padding: 5px 12px;
+    border-radius: var(--radius-sm);
+    background: transparent;
     color: var(--text-muted);
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.2s;
     border: 1px solid transparent;
+    transition: all 0.15s;
 }
-
-.symbol-badge:hover {
-    background-color: rgba(255, 255, 255, 0.1);
-}
-
-.symbol-badge.active {
-    background-color: rgba(59, 130, 246, 0.15);
+.tab-btn:hover { background: var(--border-soft); color: var(--text-main); }
+.tab-btn.active {
+    background: rgba(59,130,246,0.12);
     color: var(--accent);
-    border-color: rgba(59, 130, 246, 0.3);
+    border-color: rgba(59,130,246,0.25);
 }
 
-.chart-legend {
-    font-size: 13px;
-    font-weight: 500;
+/* Price ticker */
+.price-ticker {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-left: 8px;
 }
 
+#val-live-price {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+}
+
+.price-change {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* Spacer */
+.header-spacer { flex: 1; }
+
+.update-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+#val-last-update {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.btn-legend {
+    background: var(--border-soft);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 5px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 11px;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.btn-legend:hover { background: var(--bg-hover); color: var(--text-main); }
+
+/* ── Chart canvas ───────────────────────────────────────────────────────────── */
 .chart-container {
     flex: 1;
+    min-height: 0;    /* allows shrinking below content size */
     width: 100%;
     position: relative;
-    min-height: 400px;
-    margin-bottom: 2rem;
 }
 
-/* Summary Section */
+/* ── Summary section ─────────────────────────────────────────────────────────── */
 .summary-section {
-    padding: 0 1rem;
+    flex-shrink: 0;
+    max-height: 210px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    background: var(--bg-card);
 }
 
-.section-header {
+.summary-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    margin-bottom: 1.5rem;
+    justify-content: space-between;
+    padding: 10px 20px 8px;
+    position: sticky;
+    top: 0;
+    background: var(--bg-card);
+    z-index: 1;
+    border-bottom: 1px solid var(--border);
 }
 
-.section-header h2 {
-    font-size: 1.25rem;
+.summary-header h2 {
+    font-size: 11px;
     font-weight: 600;
-    color: var(--text-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
 }
 
-.table-card {
-    background: var(--card-bg);
-    border: 1px solid var(--border-color);
-    border-radius: 1rem;
-    overflow: hidden;
+.badge-session {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--border-soft);
+    padding: 2px 8px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
 }
 
 .summary-table {
     width: 100%;
     border-collapse: collapse;
-    text-align: left;
 }
 
 .summary-table th {
-    padding: 1rem;
-    background: rgba(255, 255, 255, 0.02);
-    font-size: 0.8rem;
+    padding: 6px 20px;
+    font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-    border-bottom: 1px solid var(--border-color);
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-align: left;
+    white-space: nowrap;
 }
 
 .summary-table td {
-    padding: 1rem;
-    border-bottom: 1px solid var(--border-color);
-    font-size: 0.9rem;
-    color: var(--text-primary);
+    padding: 8px 20px;
+    font-size: 12px;
+    color: var(--text-main);
+    border-top: 1px solid var(--border);
 }
 
-.summary-table tr:last-child td {
-    border-bottom: none;
-}
+.summary-table tr:hover td { background: var(--border-soft); }
 
-.sym-col {
+.sym-col { font-weight: 600; color: var(--accent); }
+
+.badge-trading {
+    font-size: 10px;
     font-weight: 600;
-    color: var(--primary-color);
+    color: var(--success);
+    background: rgba(16,185,129,0.1);
+    padding: 2px 8px;
+    border-radius: 20px;
+}
+.badge-idle {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--border-soft);
+    padding: 2px 8px;
+    border-radius: 20px;
 }
 
-.status-active {
-    color: var(--positive-color);
-    background: rgba(16, 185, 129, 0.1);
-    padding: 0.25rem 0.5rem;
-    border-radius: 0.5rem;
-    font-size: 0.75rem;
-}
-
-/* Legend UI */
-.update-info {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-}
-
-#val-last-update {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-}
-
-.btn-icon {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid var(--border-color);
-    color: var(--text-primary);
-    padding: 0.5rem 1rem;
-    border-radius: 0.5rem;
-    cursor: pointer;
-    font-size: 0.85rem;
-    transition: all 0.2s;
-}
-
-.btn-icon:hover {
-    background: rgba(255, 255, 255, 0.1);
-    border-color: var(--primary-color);
-}
-
+/* ── Legend overlay ─────────────────────────────────────────────────────────── */
 .legend-overlay {
     position: absolute;
-    top: 5rem;
-    right: 2rem;
-    z-index: 1000;
-    width: 320px;
-    background: rgba(15, 17, 26, 0.85);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid var(--border-color);
-    border-radius: 1rem;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-    animation: slideIn 0.3s ease-out;
+    top: 60px;
+    right: 20px;
+    z-index: 100;
+    width: 300px;
+    background: rgba(15, 17, 26, 0.92);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    animation: fadeSlide 0.2s ease-out;
 }
 
-@keyframes slideIn {
-    from { opacity: 0; transform: translateY(-10px); }
-    to { opacity: 1; transform: translateY(0); }
+@keyframes fadeSlide {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 
-.legend-content {
-    padding: 1.5rem;
-}
+.legend-content { padding: 16px 20px; }
 
 .legend-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
-    border-bottom: 1px solid var(--border-color);
-    padding-bottom: 0.75rem;
+    margin-bottom: 14px;
 }
-
-.legend-header h3 {
-    font-size: 1rem;
-    font-weight: 600;
-}
+.legend-header h3 { font-size: 13px; font-weight: 600; }
 
 .close-btn {
     background: none;
     border: none;
-    color: var(--text-secondary);
-    font-size: 1.5rem;
+    color: var(--text-muted);
+    font-size: 18px;
     cursor: pointer;
+    line-height: 1;
 }
+.close-btn:hover { color: var(--text-main); }
 
 .legend-item {
     display: flex;
-    gap: 1rem;
-    margin-bottom: 1rem;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 12px;
 }
+.legend-item:last-child { margin-bottom: 0; }
 
-.legend-item:last-child {
-    margin-bottom: 0;
-}
-
-.marker {
-    width: 2.5rem;
-    height: 2.5rem;
+.legend-icon {
+    width: 28px;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 0.5rem;
-    font-size: 1.25rem;
+    background: var(--border-soft);
+    border-radius: 6px;
+    font-size: 13px;
+    flex-shrink: 0;
 }
+.legend-icon.buy  { color: var(--accent); }
+.legend-icon.sell { color: var(--danger); }
+.legend-icon.pred { color: rgba(148,163,184,0.4); }
+.legend-icon.tp   { color: var(--success); }
+.legend-icon.sl   { color: var(--danger); }
 
-.marker.buy { color: #3b82f6; }
-.marker.sell { color: #ef4444; }
-.marker.predict { color: rgba(255, 255, 255, 0.5); }
-.marker.tp-line { color: #10b981; font-weight: bold; }
-.marker.sl-line { color: #ef4444; font-weight: bold; }
+.legend-text strong { display: block; font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+.legend-text p { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
 
-.legend-item div {
-    flex: 1;
-}
-
-.legend-item strong {
-    display: block;
-    font-size: 0.85rem;
-    margin-bottom: 0.25rem;
-}
-
-.legend-item p {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    line-height: 1.4;
-}
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
