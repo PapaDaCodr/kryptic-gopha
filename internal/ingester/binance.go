@@ -14,9 +14,11 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// binanceRestURL is a var so tests can override it with an httptest.Server URL.
+var binanceRestURL = "https://api.binance.com"
+
 const (
 	binanceStreamURL       = "wss://stream.binance.com:9443/stream?streams="
-	binanceRestURL         = "https://api.binance.com"
 	streamSuffix           = "@trade"
 	initialRetryDelay      = time.Second
 	maxRetryDelay          = 30 * time.Second
