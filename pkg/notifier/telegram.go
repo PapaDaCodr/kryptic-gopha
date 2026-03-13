@@ -2,6 +2,7 @@ package notifier
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,20 +12,17 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// CommandHandler is a callback for a parsed Telegram command
+// CommandHandler is a callback for a parsed Telegram command.
 type CommandHandler func(command string, args []string) string
 
-// Notifier defines the interface for sending alerts
+// Notifier defines the interface for sending alerts.
 type Notifier interface {
 	Notify(message string)
-	StartListening(handler CommandHandler)
+	// StartListening polls for incoming commands until ctx is cancelled.
+	StartListening(ctx context.Context, handler CommandHandler)
 }
 
-// longPollTimeout is the server-side wait duration passed to Telegram getUpdates.
-// The client timeout must exceed this value to avoid premature cancellation.
-const longPollTimeout = 30
-
-// TelegramNotifier sends messages via a Telegram Bot
+// TelegramNotifier sends messages via a Telegram Bot.
 type TelegramNotifier struct {
 	Token    string
 	ChatID   string
@@ -36,6 +34,10 @@ type TelegramNotifier struct {
 	updateID   int
 }
 
+// longPollTimeout is the server-side wait duration passed to Telegram getUpdates.
+// The pollClient timeout must exceed this value.
+const longPollTimeout = 30
+
 func NewTelegramNotifier(token, chatID string) *TelegramNotifier {
 	return &TelegramNotifier{
 		Token:      token,
@@ -45,7 +47,7 @@ func NewTelegramNotifier(token, chatID string) *TelegramNotifier {
 	}
 }
 
-// Notify sends a message asynchronously to not block the trading thread
+// Notify sends a message asynchronously to avoid blocking the trading goroutine.
 func (t *TelegramNotifier) Notify(message string) {
 	if t.Token == "" || t.ChatID == "" {
 		return
@@ -73,24 +75,44 @@ func (t *TelegramNotifier) Notify(message string) {
 	}()
 }
 
-// StartListening starts a background goroutine to long-poll Telegram for commands.
-func (t *TelegramNotifier) StartListening(handler CommandHandler) {
+// StartListening polls Telegram for commands until ctx is cancelled.
+// It must be called in a goroutine or the caller must not block on it.
+func (t *TelegramNotifier) StartListening(ctx context.Context, handler CommandHandler) {
 	if t.Token == "" {
 		return
 	}
 
 	go func() {
 		for {
+			select {
+			case <-ctx.Done():
+				log.Info().Msg("Telegram listener shutting down")
+				return
+			default:
+			}
+
 			url := fmt.Sprintf(
 				"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=%d",
 				t.Token, t.updateID+1, longPollTimeout,
 			)
 
-			// Use the dedicated poll client whose timeout exceeds longPollTimeout.
-			resp, err := t.pollClient.Get(url)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
+				// ctx was cancelled while building the request
+				return
+			}
+
+			resp, err := t.pollClient.Do(req)
+			if err != nil {
+				if ctx.Err() != nil {
+					return // shutdown in progress
+				}
 				log.Warn().Err(err).Msg("Telegram poll error, retrying in 5s")
-				time.Sleep(5 * time.Second)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Second):
+				}
 				continue
 			}
 

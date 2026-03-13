@@ -69,8 +69,8 @@ func main() {
 		trader.Notifier = tgNotifier
 		log.Info().Msg("Telegram notifications enabled")
 		
-		// Start listening for commands
-		tgNotifier.StartListening(func(command string, args []string) string {
+		// Start listening for commands; ctx cancellation stops the goroutine.
+		tgNotifier.StartListening(ctx, func(command string, args []string) string {
 			switch command {
 			case "/status":
 				trader.Lock()
