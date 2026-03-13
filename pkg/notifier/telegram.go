@@ -20,19 +20,28 @@ type Notifier interface {
 	StartListening(handler CommandHandler)
 }
 
+// longPollTimeout is the server-side wait duration passed to Telegram getUpdates.
+// The client timeout must exceed this value to avoid premature cancellation.
+const longPollTimeout = 30
+
 // TelegramNotifier sends messages via a Telegram Bot
 type TelegramNotifier struct {
 	Token    string
 	ChatID   string
-	client   *http.Client
-	updateID int
+	// client is used for short outbound requests (sendMessage, etc.).
+	client *http.Client
+	// pollClient is used exclusively for long-poll getUpdates calls.
+	// Its timeout must exceed longPollTimeout to avoid cutting responses short.
+	pollClient *http.Client
+	updateID   int
 }
 
 func NewTelegramNotifier(token, chatID string) *TelegramNotifier {
 	return &TelegramNotifier{
-		Token:  token,
-		ChatID: chatID,
-		client: &http.Client{Timeout: 5 * time.Second},
+		Token:      token,
+		ChatID:     chatID,
+		client:     &http.Client{Timeout: 5 * time.Second},
+		pollClient: &http.Client{Timeout: (longPollTimeout + 5) * time.Second},
 	}
 }
 
@@ -64,7 +73,7 @@ func (t *TelegramNotifier) Notify(message string) {
 	}()
 }
 
-// StartListening starts a background goroutine to long-poll Telegram for commands
+// StartListening starts a background goroutine to long-poll Telegram for commands.
 func (t *TelegramNotifier) StartListening(handler CommandHandler) {
 	if t.Token == "" {
 		return
@@ -72,10 +81,15 @@ func (t *TelegramNotifier) StartListening(handler CommandHandler) {
 
 	go func() {
 		for {
-			url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30", t.Token, t.updateID+1)
-			
-			resp, err := t.client.Get(url)
+			url := fmt.Sprintf(
+				"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=%d",
+				t.Token, t.updateID+1, longPollTimeout,
+			)
+
+			// Use the dedicated poll client whose timeout exceeds longPollTimeout.
+			resp, err := t.pollClient.Get(url)
 			if err != nil {
+				log.Warn().Err(err).Msg("Telegram poll error, retrying in 5s")
 				time.Sleep(5 * time.Second)
 				continue
 			}
@@ -92,28 +106,34 @@ func (t *TelegramNotifier) StartListening(handler CommandHandler) {
 					} `json:"message"`
 				} `json:"result"`
 			}
-			
-			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Ok {
-				for _, update := range result.Result {
-					t.updateID = update.UpdateID
-					
-					// Convert ChatID to string for comparison
-					msgChatID := fmt.Sprintf("%.0f", update.Message.Chat.ID)
-					
-					// Only process messages from the authorized ChatID starting with /
-					if msgChatID == t.ChatID && len(update.Message.Text) > 0 && update.Message.Text[0] == '/' {
-						parts := strings.Fields(update.Message.Text)
-						command := parts[0]
-						args := parts[1:]
-						
-						response := handler(command, args)
-						if response != "" {
-							t.Notify(response)
-						}
+
+			decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+			resp.Body.Close()
+
+			if decodeErr != nil {
+				log.Warn().Err(decodeErr).Msg("Telegram poll decode error")
+				continue
+			}
+			if !result.Ok {
+				continue
+			}
+
+			for _, update := range result.Result {
+				t.updateID = update.UpdateID
+
+				msgChatID := fmt.Sprintf("%.0f", update.Message.Chat.ID)
+
+				// Only process commands from the authorised chat ID.
+				if msgChatID == t.ChatID && len(update.Message.Text) > 0 && update.Message.Text[0] == '/' {
+					parts := strings.Fields(update.Message.Text)
+					command := parts[0]
+					args := parts[1:]
+
+					if response := handler(command, args); response != "" {
+						t.Notify(response)
 					}
 				}
 			}
-			resp.Body.Close()
 		}
 	}()
 }
