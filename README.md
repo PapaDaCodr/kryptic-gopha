@@ -1,46 +1,196 @@
-# Kryptic Gopha: A Quantitative Framework for Low-Latency Crypto-Asset Arbitrage
+# Kryptic Gopha
 
-Kryptic Gopha is a high-performance, concurrent quantitative trading engine engineered in Go. The platform moves beyond simple algorithmic execution into the realm of heuristically-governed market analysis, utilizing institutional-grade risk modeling and recursive signal processing to capture alpha in high-volatility environments.
+A concurrent algorithmic trading engine written in Go, targeting Binance USDT-M Perpetual Futures. The system supports both paper trading (simulation against live market data) and live execution, controlled via a web dashboard and Telegram bot.
 
-## Core Research Hypotheses
+---
 
-The engine's execution logic is predicated on the following statistical assumptions:
-1. **Trend Inertia**: Large-cap crypto assets (BTC, ETH) exhibit strong directional momentum when price action aligns across multiple time-frequency domains (EMA Convergence).
-2. **Mean Reversion Boundary**: Extreme RSI thresholds coupled with Volume delta identify exhaustion points in minor trends, allowing for high-probability counter-trend entries or exit optimizations.
-3. **Macro-alignment Filter**: Superior ROI is achieved by suppressing counter-trend signals using a 200-period EMA heuristic as a global bias indicator.
+## Architecture
 
-## Technical Architecture
+```
+cmd/
+  server/       — Main server process (paper + live modes)
+  backtester/   — CLI tool for historical simulation
 
-### 1. Signal Processing Pipeline
-- **Recursive Heuristics**: Implementing incremental O(1) algorithms for EMA and RSI calculation, ensuring that computational overhead remains constant regardless of historical window size (N).
-- **Signal Multi-Factorism**: The `EfficientStrategy` module synthesizes multiple indicators into a single confidence-weighted signal before dispatching to the execution layer.
+internal/
+  engine/       — Core trading loop: strategy, candle aggregation, position management
+  exchange/     — Authenticated Binance Futures REST client
+  ingester/     — Binance WebSocket stream consumer + historical klines fetcher
+  models/       — Domain types: MarketTick, Signal, Candle
 
-### 2. High-Concurrency State Management
-- **Sharded Mutex Lock**: Symbols (BTCUSDT, SOLUSDT, etc.) are processed in parallel within isolated state containers, preventing global thread contention and reducing "Noise-to-Signal" latency.
-- **WebSocket Multiplexing**: Utilizes high-speed streams from Binance Tier-1 liquidity pools for sub-second price delta detection.
+pkg/
+  notifier/     — Telegram bot: async notifications + command listener
 
-### 3. Risk Management & Portfolio Construction
-- **Kelly Criterion Approximation**: Automatic position sizing based on a 1.0% Capital-at-Risk (CaR) per trade, optimized for logarithmic growth while preventing catastrophic drawdown.
-- **Dynamic Exit Logic**: Features a triple-layer exit strategy: Adaptive Take-Profit (TP), Fixed Stop-Loss (SL), and a Trailing SL heuristic to capture "long-tail" profits.
-- **Circuit Breaker Heuristic**: Monitors real-time Daily PnL; trading is suspended upon a 5% baseline drawdown to preserve capital during unpredictable "Black Swan" events.
+web/            — Dashboard frontend (HTML/JS/CSS)
+research/       — Strategy research and analysis documents
+```
 
-## Observability & Empirical Tools
+### Data Flow
 
-- **Visual Dashboard**: Real-time TradingView-integrated analytics for visualizing "Model Predictions" (Signals) vs. "Empirical Outcomes" (Market Price).
-- **Multisymbol Performance Matrix**: A comprehensive breakdown of Win Rates, Expected Value (EV), and PnL across the entire watchlist.
-- **Structured Telemetry**: High-precision JSON logging facilitates post-trade quantitative analysis and strategy backtesting.
+```
+Binance WS Stream
+      │
+      ▼
+   Ingester  ──── tick ────►  EngineManager
+                                    │
+                          ┌─────────┼──────────┐
+                          ▼         ▼           ▼
+                      Candle    Trader        Strategy
+                    Aggregation UpdateMetrics  Analyze
+                          │                     │
+                          │                   Signal
+                          │                     │
+                          └─────────────────────►
+                                                 │
+                                            Trader.OnSignal
+                                                 │
+                                        Exchange Orders (live)
+                                        Simulated P&L (paper)
+```
 
-## Developer & Research Setup
+---
 
-### Prerequisites
-- Go 1.22+
-- Tier-1 Exchange API Access (Optional for Paper-trading)
+## Strategy
 
-### Execution
+The production strategy (`EfficientMultiFactorStrategy`) uses three sequential filters:
+
+1. **Macro trend filter** — price must be above the 200-period EMA for longs and below for shorts. This is the single highest-value filter: it suppresses the majority of losing counter-trend trades.
+
+2. **Entry trigger** — the 12-period EMA must cross the 26-period EMA in the direction of the macro trend. This is equivalent to a MACD signal crossover.
+
+3. **Momentum gate** — RSI(14) must be below 70 for longs and above 30 for shorts, preventing entries near exhaustion points.
+
+All indicators are computed incrementally using Wilder's smoothing, so each bar update is O(1) regardless of lookback period size. State is seeded on first contact with each symbol by fetching 100 historical 1-minute klines from the Binance REST API.
+
+**Known limitations** — see [research/hft_analysis.md](research/hft_analysis.md) for a detailed quantitative assessment and improvement roadmap.
+
+---
+
+## Risk Management
+
+| Parameter | Paper Default | Live Default | Environment Variable |
+|---|---|---|---|
+| Take-profit | 5% | 0.5% | `TP` |
+| Stop-loss | 2% | 0.3% | `SL` |
+| Trailing SL distance | 1.5% | 0.3% | `TRAILING_SL_PCT` |
+| Risk per trade | 2% of balance | 1% of balance | `RISK_PER_TRADE` |
+| Daily loss limit | 6% | 5% | `DAILY_LOSS_LIMIT` |
+| Max open trades | 5 | 3 | `MAX_OPEN_TRADES` |
+
+Position size is calculated as `(balance × risk%) / (entry_price × sl%)`, bounding the dollar loss on any single trade to the configured risk percentage.
+
+A **circuit breaker** suspends all new entries when daily PnL falls below `DAILY_LOSS_LIMIT`. It resets automatically at calendar day rollover or on the `/resume` Telegram command.
+
+---
+
+## Configuration
+
+All configuration is read from environment variables at startup. Copy `.env.example` to `.env` and set values before running.
+
+```env
+# Trading mode
+TRADING_MODE=paper          # paper | live
+
+# Strategy periods
+SHORT_PERIOD=12
+LONG_PERIOD=26
+RSI_PERIOD=14
+BAR_INTERVAL_SECONDS=60     # Candle aggregation interval
+
+# Watchlist (comma-separated Binance USDT-M futures symbols)
+WATCHLIST=BTCUSDT,ETHUSDT,BNBUSDT
+
+# Capital and risk
+INITIAL_BALANCE=10000
+TP=0.05
+SL=0.02
+TRAILING_SL=true
+TRAILING_SL_PCT=0.015
+RISK_PER_TRADE=0.02
+DAILY_LOSS_LIMIT=0.06
+MAX_OPEN_TRADES=5
+
+# Live mode only
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
+
+# Optional: Telegram control panel
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# Server
+PORT=8080
+ENV=dev                     # dev = human-readable logs; omit for JSON logs
+```
+
+---
+
+## Running
+
+**Paper trading (default):**
 ```bash
-# Research-Mode: Paper Trading Engine
 go run cmd/server/main.go
 ```
 
+**Live trading:**
+```bash
+TRADING_MODE=live go run cmd/server/main.go
+```
+
+**Backtester:**
+```bash
+go run cmd/backtester/main.go -symbol BTCUSDT -interval 1m -limit 500
+```
+
+**Docker:**
+```bash
+make run
+# or
+docker build -t kryptic-gopha .
+docker run --env-file .env -p 8080:8080 kryptic-gopha
+```
+
+---
+
+## API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Bot status, win rate, active trade count |
+| GET | `/api/state` | Full trader state snapshot |
+| GET | `/api/trades` | Active and completed trades |
+| GET | `/api/signals?symbol=BTCUSDT` | Recent signal history for a symbol |
+| GET | `/api/candles?symbol=BTCUSDT` | OHLCV history + current forming bar |
+| GET | `/` | Web dashboard |
+
+---
+
+## Telegram Commands
+
+| Command | Description |
+|---|---|
+| `/status` | Balance, daily PnL, active trade count |
+| `/stop` | Immediately suspend all new entries |
+| `/resume` | Re-enable trading (clears circuit breaker) |
+| `/setbalance <amount>` | Update trading capital |
+| `/help` | Command list |
+
+---
+
+## Development
+
+```bash
+# Run all tests
+go test ./...
+
+# Run with race detector
+go test -race ./...
+
+# Build binary
+go build -o bin/kryptic-gopha ./cmd/server
+```
+
+---
+
 ## Disclaimer
-This project is a quantitative research tool. Cryptocurrency markets are highly stochastic and involve extreme risk. This software is not financial advice.
+
+This software is a research and educational tool. Cryptocurrency trading involves substantial risk of loss. Nothing in this codebase constitutes financial advice. Use in live markets entirely at your own risk.

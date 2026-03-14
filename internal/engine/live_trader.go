@@ -14,24 +14,32 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// LiveTrader implements the Trader interface and executes real orders on
-// Binance USDT-M Futures.  It mirrors the risk management logic of
-// PaperTrader so behaviour is identical; only the order execution differs.
+// LiveTrader executes real orders on Binance USDT-M Futures. Its risk
+// management logic mirrors PaperTrader exactly; only the execution path differs.
+//
+// Position lifecycle:
+//  1. OnSignal: entry MARKET → TP bracket → SL bracket. If either bracket
+//     fails, the entry is closed at market immediately. A live position is
+//     never left unprotected.
+//  2. UpdateMetrics: mirrors TP/SL locally for dashboard accuracy. When the
+//     local check triggers, it cancels only the bracket orders belonging to
+//     that specific trade (by order ID) to avoid disturbing concurrent
+//     positions on the same symbol.
+//  3. TIME_EXIT: places a closing MARKET order to actually close the position
+//     on-exchange, then cancels the remaining brackets.
 type LiveTrader struct {
 	mu sync.Mutex
 
 	client   *exchange.Client
 	Notifier notifier.Notifier
 
-	// Risk settings — match PaperTrader fields so main.go config is the same.
-	TP            decimal.Decimal
-	SL            decimal.Decimal
-	TrailingSLPct decimal.Decimal
-	RiskPerTrade  decimal.Decimal
-	MaxOpenTrades int
+	TP             decimal.Decimal
+	SL             decimal.Decimal
+	TrailingSLPct  decimal.Decimal
+	RiskPerTrade   decimal.Decimal
+	MaxOpenTrades  int
 	DailyLossLimit decimal.Decimal
 
-	// Accounting state (mirrors PaperTrader for the dashboard and /api/state).
 	Balance        decimal.Decimal
 	InitialBalance decimal.Decimal
 	DailyPnL       decimal.Decimal
@@ -43,8 +51,8 @@ type LiveTrader struct {
 	Completed      []Trade
 }
 
-// NewLiveTrader creates a LiveTrader.  The starting balance is fetched live
-// from Binance at startup; the value passed here is only used as a fallback.
+// NewLiveTrader constructs a LiveTrader. The starting balance is fetched from
+// Binance via SyncBalance; the fallbackBalance is used only if that call fails.
 func NewLiveTrader(client *exchange.Client, fallbackBalance float64) *LiveTrader {
 	bal := decimal.NewFromFloat(fallbackBalance)
 	return &LiveTrader{
@@ -65,8 +73,8 @@ func NewLiveTrader(client *exchange.Client, fallbackBalance float64) *LiveTrader
 	}
 }
 
-// SyncBalance fetches the live USDT balance from Binance and updates the
-// internal accounting.  Call once at startup after creating the trader.
+// SyncBalance fetches the live USDT balance from Binance. Call once after
+// construction so the internal accounting reflects the real account state.
 func (lt *LiveTrader) SyncBalance() error {
 	bal, err := lt.client.GetUSDTBalance()
 	if err != nil {
@@ -79,8 +87,6 @@ func (lt *LiveTrader) SyncBalance() error {
 	log.Info().Str("balance", bal.StringFixed(2)).Msg("Live balance synced from Binance")
 	return nil
 }
-
-// ── Trader interface ──────────────────────────────────────────────────────────
 
 func (lt *LiveTrader) OnSignal(sig models.Signal) {
 	lt.mu.Lock()
@@ -101,7 +107,6 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 		return
 	}
 
-	// Determine order sides.
 	entrySide := exchange.SideBuy
 	exitSide := exchange.SideSell
 	if sig.Direction == "SELL" {
@@ -109,82 +114,80 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 		exitSide = exchange.SideBuy
 	}
 
-	// Get LOT_SIZE rules and compute quantity.
 	info, err := lt.client.GetSymbolInfo(sig.Symbol)
 	if err != nil {
 		log.Error().Err(err).Str("symbol", sig.Symbol).Msg("Failed to get symbol info")
 		return
 	}
 
-	// Check minimum notional.
 	riskAmount := lt.Balance.Mul(lt.RiskPerTrade)
 	rawQty := riskAmount.Div(sig.Price.Mul(lt.SL))
 	qty := exchange.RoundToStepSize(rawQty, info.StepSize)
 
 	if qty.LessThan(info.MinQty) {
-		log.Warn().
-			Str("symbol", sig.Symbol).
-			Str("qty", qty.String()).
-			Str("min_qty", info.MinQty.String()).
-			Msg("Order quantity below minimum; skipping trade")
+		log.Warn().Str("symbol", sig.Symbol).Str("qty", qty.String()).Msg("Qty below minimum; skipping trade")
 		return
 	}
 	if !info.MinNotional.IsZero() && qty.Mul(sig.Price).LessThan(info.MinNotional) {
-		log.Warn().
-			Str("symbol", sig.Symbol).
-			Str("notional", qty.Mul(sig.Price).StringFixed(2)).
-			Str("min_notional", info.MinNotional.StringFixed(2)).
-			Msg("Order notional below minimum; skipping trade")
+		log.Warn().Str("symbol", sig.Symbol).Str("notional", qty.Mul(sig.Price).StringFixed(2)).Msg("Notional below minimum; skipping trade")
 		return
 	}
 
-	// Place entry market order.
-	result, err := lt.client.PlaceMarketOrder(sig.Symbol, entrySide, qty)
+	entryResult, err := lt.client.PlaceMarketOrder(sig.Symbol, entrySide, qty)
 	if err != nil {
-		log.Error().Err(err).Str("symbol", sig.Symbol).Msg("Failed to place entry order")
+		log.Error().Err(err).Str("symbol", sig.Symbol).Msg("Entry order failed")
 		if lt.Notifier != nil {
 			lt.Notifier.Notify(fmt.Sprintf("❌ *ORDER FAILED*\n%s %s: %v", sig.Direction, sig.Symbol, err))
 		}
 		return
 	}
 
-	entryPrice := result.AvgPrice
+	entryPrice := entryResult.AvgPrice
 	if entryPrice.IsZero() {
-		entryPrice = sig.Price // fallback if avg not yet filled
+		entryPrice = sig.Price
 	}
-
+	executedQty := entryResult.ExecutedQty
 	one := decimal.NewFromInt(1)
 
-	// Place TP and SL bracket orders (best-effort; log errors but don't abort).
+	var tpPrice, slPrice decimal.Decimal
 	if sig.Direction == "BUY" {
-		tpPrice := entryPrice.Mul(one.Add(lt.TP))
-		slPrice := entryPrice.Mul(one.Sub(lt.SL))
-		if _, err := lt.client.PlaceTakeProfitMarketOrder(sig.Symbol, exitSide, qty, tpPrice); err != nil {
-			log.Error().Err(err).Str("symbol", sig.Symbol).Msg("Failed to place TP order")
-		}
-		if _, err := lt.client.PlaceStopMarketOrder(sig.Symbol, exitSide, qty, slPrice); err != nil {
-			log.Error().Err(err).Str("symbol", sig.Symbol).Msg("Failed to place SL order")
-		}
+		tpPrice = entryPrice.Mul(one.Add(lt.TP))
+		slPrice = entryPrice.Mul(one.Sub(lt.SL))
 	} else {
-		tpPrice := entryPrice.Mul(one.Sub(lt.TP))
-		slPrice := entryPrice.Mul(one.Add(lt.SL))
-		if _, err := lt.client.PlaceTakeProfitMarketOrder(sig.Symbol, exitSide, qty, tpPrice); err != nil {
-			log.Error().Err(err).Str("symbol", sig.Symbol).Msg("Failed to place TP order")
+		tpPrice = entryPrice.Mul(one.Sub(lt.TP))
+		slPrice = entryPrice.Mul(one.Add(lt.SL))
+	}
+
+	// Place TP bracket. On failure, unwind the entry immediately.
+	tpResult, err := lt.client.PlaceTakeProfitMarketOrder(sig.Symbol, exitSide, executedQty, tpPrice)
+	if err != nil {
+		log.Error().Err(err).Str("symbol", sig.Symbol).Msg("TP order failed — closing entry at market")
+		lt.emergencyClose(sig.Symbol, exitSide, executedQty, "TP placement failed")
+		return
+	}
+
+	// Place SL bracket. On failure, cancel TP and unwind the entry.
+	slResult, err := lt.client.PlaceStopMarketOrder(sig.Symbol, exitSide, executedQty, slPrice)
+	if err != nil {
+		log.Error().Err(err).Str("symbol", sig.Symbol).Msg("SL order failed — cancelling TP and closing entry at market")
+		if cancelErr := lt.client.CancelOrder(sig.Symbol, tpResult.OrderID); cancelErr != nil {
+			log.Error().Err(cancelErr).Str("symbol", sig.Symbol).Msg("Failed to cancel TP during SL-failure rollback")
 		}
-		if _, err := lt.client.PlaceStopMarketOrder(sig.Symbol, exitSide, qty, slPrice); err != nil {
-			log.Error().Err(err).Str("symbol", sig.Symbol).Msg("Failed to place SL order")
-		}
+		lt.emergencyClose(sig.Symbol, exitSide, executedQty, "SL placement failed")
+		return
 	}
 
 	trade := &Trade{
 		Symbol:        sig.Symbol,
 		EntryPrice:    entryPrice,
-		Quantity:      result.ExecutedQty,
+		Quantity:      executedQty,
 		Direction:     sig.Direction,
 		Time:          sig.Timestamp,
 		Exits:         make(map[int]decimal.Decimal),
 		Status:        "ACTIVE",
 		HighWaterMark: entryPrice,
+		TPOrderID:     tpResult.OrderID,
+		SLOrderID:     slResult.OrderID,
 	}
 	lt.ActiveTrades[sig.Symbol] = append(lt.ActiveTrades[sig.Symbol], trade)
 
@@ -192,19 +195,23 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 		Str("symbol", sig.Symbol).
 		Str("direction", sig.Direction).
 		Str("price", entryPrice.String()).
-		Str("qty", result.ExecutedQty.StringFixed(4)).
-		Int64("order_id", result.OrderID).
+		Str("qty", executedQty.StringFixed(4)).
+		Int64("order_id", entryResult.OrderID).
+		Int64("tp_order_id", tpResult.OrderID).
+		Int64("sl_order_id", slResult.OrderID).
 		Msg("Live trade opened")
 
 	if lt.Notifier != nil {
-		lt.Notifier.Notify(fmt.Sprintf("🚀 *LIVE TRADE OPENED*\nSymbol: `%s`\nDirection: %s\nPrice: %s\nQty: %s\nOrderID: %d",
-			sig.Symbol, sig.Direction, entryPrice.String(), result.ExecutedQty.StringFixed(4), result.OrderID))
+		lt.Notifier.Notify(fmt.Sprintf(
+			"🚀 *LIVE TRADE OPENED*\nSymbol: `%s`\nDirection: %s\nPrice: %s\nQty: %s\nOrderID: %d",
+			sig.Symbol, sig.Direction, entryPrice.String(), executedQty.StringFixed(4), entryResult.OrderID))
 	}
 }
 
-// UpdateMetrics mirrors PaperTrader.UpdateMetrics but does NOT close orders
-// here — Binance bracket orders handle TP/SL on-exchange.  We only update
-// the local accounting mirror so the dashboard stays accurate.
+// UpdateMetrics mirrors the TP/SL evaluation locally so the dashboard stays
+// accurate. When a trade closes, it cancels only the bracket orders for that
+// specific trade using the stored order IDs, leaving other positions' brackets
+// untouched.
 func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal, now time.Time) {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
@@ -218,7 +225,6 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 	remaining := make([]*Trade, 0, len(trades))
 
 	for _, t := range trades {
-		// Update HWM for local display.
 		if t.Direction == "BUY" && currentPrice.GreaterThan(t.HighWaterMark) {
 			t.HighWaterMark = currentPrice
 		} else if t.Direction == "SELL" && currentPrice.LessThan(t.HighWaterMark) {
@@ -229,8 +235,6 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 		isLoss := false
 		exitReason := ""
 
-		// Mirror the same TP/SL checks as PaperTrader so the local dashboard
-		// updates when Binance would have triggered the bracket order.
 		if t.Direction == "BUY" {
 			if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(lt.TP))) {
 				isWin, exitReason = true, "TP_HIT"
@@ -245,26 +249,50 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 			}
 		}
 
-		if !isWin && !isLoss {
-			// 10-minute time-based accounting close (bracket stays live on exchange).
-			if now.Sub(t.Time) >= 10*time.Minute {
-				if t.Direction == "BUY" {
-					isWin = currentPrice.GreaterThan(t.EntryPrice)
-				} else {
-					isWin = currentPrice.LessThan(t.EntryPrice)
-				}
-				isLoss = !isWin
-				exitReason = "TIME_EXIT"
-			}
+		if !isWin && !isLoss && now.Sub(t.Time) >= 10*time.Minute {
+			isWin = (t.Direction == "BUY" && currentPrice.GreaterThan(t.EntryPrice)) ||
+				(t.Direction == "SELL" && currentPrice.LessThan(t.EntryPrice))
+			isLoss = !isWin
+			exitReason = "TIME_EXIT"
 		}
 
 		if isWin || isLoss {
 			t.ExitReason = exitReason
-			lt.closeLocal(t, currentPrice, isWin)
-			// Cancel any remaining bracket orders for this position.
-			if err := lt.client.CancelAllOpenOrders(symbol); err != nil {
-				log.Warn().Err(err).Str("symbol", symbol).Msg("Cancel bracket orders failed")
+
+			// For TIME_EXIT, the position is still open on-exchange and must be
+			// closed explicitly. TP/SL exits mean one bracket already executed;
+			// only the surviving bracket needs to be cancelled.
+			if exitReason == "TIME_EXIT" {
+				closeSide := exchange.SideSell
+				if t.Direction == "SELL" {
+					closeSide = exchange.SideBuy
+				}
+				if _, err := lt.client.PlaceMarketOrder(symbol, closeSide, t.Quantity); err != nil {
+					log.Error().Err(err).Str("symbol", symbol).
+						Msg("CRITICAL: TIME_EXIT market-close failed — manual intervention may be required")
+					if lt.Notifier != nil {
+						lt.Notifier.Notify(fmt.Sprintf(
+							"🚨 *TIME-EXIT FAILED*\nCould not close `%s` position. Check Binance.", symbol))
+					}
+				}
+				lt.cancelTradeBrackets(symbol, t)
+			} else if exitReason == "TP_HIT" {
+				// TP bracket executed on exchange; cancel the now-orphaned SL bracket.
+				if t.SLOrderID != 0 {
+					if err := lt.client.CancelOrder(symbol, t.SLOrderID); err != nil {
+						log.Warn().Err(err).Int64("order_id", t.SLOrderID).Msg("Failed to cancel SL bracket after TP hit")
+					}
+				}
+			} else {
+				// SL_HIT: cancel the orphaned TP bracket.
+				if t.TPOrderID != 0 {
+					if err := lt.client.CancelOrder(symbol, t.TPOrderID); err != nil {
+						log.Warn().Err(err).Int64("order_id", t.TPOrderID).Msg("Failed to cancel TP bracket after SL hit")
+					}
+				}
 			}
+
+			lt.closeLocal(t, currentPrice, isWin)
 			continue
 		}
 
@@ -278,12 +306,47 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 	}
 }
 
+// cancelTradeBrackets cancels both the TP and SL orders for a single trade.
+// Errors are logged as warnings because the orders may have already been filled
+// or cancelled on the exchange side.
+func (lt *LiveTrader) cancelTradeBrackets(symbol string, t *Trade) {
+	if t.TPOrderID != 0 {
+		if err := lt.client.CancelOrder(symbol, t.TPOrderID); err != nil {
+			log.Warn().Err(err).Int64("order_id", t.TPOrderID).Str("symbol", symbol).Msg("Failed to cancel TP bracket")
+		}
+	}
+	if t.SLOrderID != 0 {
+		if err := lt.client.CancelOrder(symbol, t.SLOrderID); err != nil {
+			log.Warn().Err(err).Int64("order_id", t.SLOrderID).Str("symbol", symbol).Msg("Failed to cancel SL bracket")
+		}
+	}
+}
+
+// emergencyClose places a market order to close an unprotected position. It is
+// called when bracket placement fails during OnSignal. If the close itself
+// fails, an alert is fired because the position now requires manual handling.
+func (lt *LiveTrader) emergencyClose(symbol string, side exchange.OrderSide, qty decimal.Decimal, reason string) {
+	if _, err := lt.client.PlaceMarketOrder(symbol, side, qty); err != nil {
+		log.Error().Err(err).Str("symbol", symbol).Str("reason", reason).
+			Msg("CRITICAL: emergency close failed — position is unprotected, manual intervention required")
+		if lt.Notifier != nil {
+			lt.Notifier.Notify(fmt.Sprintf(
+				"🚨 *CRITICAL: MANUAL CLOSE REQUIRED*\n`%s` has an unprotected position.\nReason: %s", symbol, reason))
+		}
+		return
+	}
+	log.Warn().Str("symbol", symbol).Str("reason", reason).Msg("Entry unwound via emergency close")
+	if lt.Notifier != nil {
+		lt.Notifier.Notify(fmt.Sprintf("⚠️ *ENTRY UNWOUND*\n`%s` entry closed at market.\nReason: %s", symbol, reason))
+	}
+}
+
 func (lt *LiveTrader) closeLocal(t *Trade, currentPrice decimal.Decimal, isWin bool) {
-	t.Status = "LOSS"
 	if isWin {
 		t.Status = "WIN"
 		lt.TotalWins++
 	} else {
+		t.Status = "LOSS"
 		lt.TotalLosses++
 	}
 	t.ExitPrice = currentPrice
@@ -310,7 +373,8 @@ func (lt *LiveTrader) closeLocal(t *Trade, currentPrice decimal.Decimal, isWin b
 		if t.Status == "WIN" {
 			emoji = "✅"
 		}
-		lt.Notifier.Notify(fmt.Sprintf("%s *LIVE TRADE CLOSED*\nSymbol: `%s`\nDirection: %s\nEntry: %s → Exit: %s\nPnL: `%s`\nReason: %s\nResult: *%s*",
+		lt.Notifier.Notify(fmt.Sprintf(
+			"%s *LIVE TRADE CLOSED*\nSymbol: `%s`\nDirection: %s\nEntry: %s → Exit: %s\nPnL: `%s`\nReason: %s\nResult: *%s*",
 			emoji, t.Symbol, t.Direction, t.EntryPrice.String(), currentPrice.String(),
 			pnl.StringFixed(2), t.ExitReason, t.Status))
 	}
@@ -320,7 +384,7 @@ func (lt *LiveTrader) closeLocal(t *Trade, currentPrice decimal.Decimal, isWin b
 		lt.TradingEnabled = false
 		log.Error().
 			Str("daily_pnl", lt.DailyPnL.StringFixed(2)).
-			Msg("CIRCUIT BREAKER: daily loss limit hit. Live trading suspended.")
+			Msg("Circuit breaker: daily loss limit hit, live trading suspended")
 		if lt.Notifier != nil {
 			lt.Notifier.Notify(fmt.Sprintf("🛑 *CIRCUIT BREAKER*\nDaily PnL: `%s`\nLive trading *SUSPENDED*",
 				lt.DailyPnL.StringFixed(2)))
@@ -337,7 +401,7 @@ func (lt *LiveTrader) checkDailyReset() {
 		lt.TradingEnabled = true
 		lt.InitialBalance = lt.Balance
 		lt.LastDailyReset = now
-		log.Info().Msg("Live trader daily risk reset.")
+		log.Info().Msg("Live trader daily risk reset")
 	}
 }
 
@@ -353,22 +417,18 @@ func (lt *LiveTrader) GetStats() TraderStats {
 	for _, trades := range lt.ActiveTrades {
 		active += len(trades)
 	}
-	return TraderStats{TotalSignals: total, WinRate: wr, ActiveTrades: active}
+	return TraderStats{
+		TotalSignals: total,
+		WinRate:      wr,
+		ActiveTrades: active,
+		TotalWins:    lt.TotalWins,
+		TotalLosses:  lt.TotalLosses,
+	}
 }
 
 func (lt *LiveTrader) GetState() TraderState {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
-
-	activeCopy := make(map[string][]*Trade, len(lt.ActiveTrades))
-	for sym, trades := range lt.ActiveTrades {
-		cp := make([]*Trade, len(trades))
-		copy(cp, trades)
-		activeCopy[sym] = cp
-	}
-	completedCopy := make([]Trade, len(lt.Completed))
-	copy(completedCopy, lt.Completed)
-
 	return TraderState{
 		Balance:        lt.Balance,
 		InitialBalance: lt.InitialBalance,
@@ -376,25 +436,18 @@ func (lt *LiveTrader) GetState() TraderState {
 		TotalWins:      lt.TotalWins,
 		TotalLosses:    lt.TotalLosses,
 		TradingEnabled: lt.TradingEnabled,
-		ActiveTrades:   activeCopy,
-		Completed:      completedCopy,
+		ActiveTrades:   deepCopyActiveTrades(lt.ActiveTrades),
+		Completed:      append([]Trade(nil), lt.Completed...),
 	}
 }
 
 func (lt *LiveTrader) GetTrades() TradesSnapshot {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
-
-	activeCopy := make(map[string][]*Trade, len(lt.ActiveTrades))
-	for sym, trades := range lt.ActiveTrades {
-		cp := make([]*Trade, len(trades))
-		copy(cp, trades)
-		activeCopy[sym] = cp
+	return TradesSnapshot{
+		Active:    deepCopyActiveTrades(lt.ActiveTrades),
+		Completed: append([]Trade(nil), lt.Completed...),
 	}
-	completedCopy := make([]Trade, len(lt.Completed))
-	copy(completedCopy, lt.Completed)
-
-	return TradesSnapshot{Active: activeCopy, Completed: completedCopy}
 }
 
 func (lt *LiveTrader) SetTradingEnabled(enabled bool) {
@@ -410,7 +463,6 @@ func (lt *LiveTrader) SetBalance(bal decimal.Decimal) {
 	lt.InitialBalance = bal
 }
 
-// SaveState persists a JSON snapshot of the live trader (for restart recovery).
 func (lt *LiveTrader) SaveState(filename string) error {
 	lt.mu.Lock()
 	data, err := json.MarshalIndent(lt, "", "  ")
@@ -421,7 +473,6 @@ func (lt *LiveTrader) SaveState(filename string) error {
 	return os.WriteFile(filename, data, 0644)
 }
 
-// LoadState restores trader state from disk.
 func (lt *LiveTrader) LoadState(filename string) error {
 	data, err := os.ReadFile(filename)
 	if err != nil {

@@ -1,11 +1,5 @@
 // Package exchange provides a thin authenticated client for the Binance
 // USDT-M Futures REST API (fapi.binance.com).
-//
-// Supported operations:
-//   - Account balance query
-//   - Exchange info / LOT_SIZE filter lookup
-//   - Market and limit order placement
-//   - Open position query
 package exchange
 
 import (
@@ -22,10 +16,12 @@ import (
 
 const (
 	defaultBaseURL    = "https://fapi.binance.com"
-	defaultRecvWindow = 5000 // ms
+	defaultRecvWindow = 5000 // milliseconds; generous window for clock skew on VPS
 )
 
-// Client is an authenticated Binance Futures REST client.
+// Client is an authenticated Binance USDT-M Futures REST client.
+// It is safe for concurrent use across goroutines; the underlying http.Client
+// manages connection pooling internally.
 type Client struct {
 	apiKey    string
 	secretKey string
@@ -33,7 +29,8 @@ type Client struct {
 	http      *http.Client
 }
 
-// NewClient creates a new authenticated Binance Futures client.
+// NewClient constructs an authenticated Binance Futures client using
+// HMAC-SHA256 request signing.
 func NewClient(apiKey, secretKey string) *Client {
 	return &Client{
 		apiKey:    apiKey,
@@ -43,24 +40,26 @@ func NewClient(apiKey, secretKey string) *Client {
 	}
 }
 
-// newClientWithBase is used in tests to inject a custom base URL.
+// newClientWithBase overrides the base URL. Used in tests to redirect
+// requests to an httptest.Server without modifying the public API surface.
 func newClientWithBase(apiKey, secretKey, baseURL string) *Client {
 	c := NewClient(apiKey, secretKey)
 	c.baseURL = baseURL
 	return c
 }
 
-// sign appends timestamp + recvWindow + HMAC-SHA256 signature to params.
+// sign mutates params in-place, appending the timestamp, recvWindow, and
+// HMAC-SHA256 signature required by every authenticated Binance endpoint.
+// Callers must encode params *after* this call.
 func (c *Client) sign(params url.Values) {
 	params.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
 	params.Set("recvWindow", strconv.Itoa(defaultRecvWindow))
-
 	mac := hmac.New(sha256.New, []byte(c.secretKey))
 	mac.Write([]byte(params.Encode()))
 	params.Set("signature", hex.EncodeToString(mac.Sum(nil)))
 }
 
-// publicGet performs an unauthenticated GET (e.g. /fapi/v1/exchangeInfo).
+// publicGet issues an unauthenticated GET (e.g. /fapi/v1/exchangeInfo).
 func (c *Client) publicGet(path string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet,
 		fmt.Sprintf("%s%s", c.baseURL, path), nil)
@@ -70,13 +69,12 @@ func (c *Client) publicGet(path string) ([]byte, error) {
 	return c.doRequest(req, path)
 }
 
-// get performs an authenticated GET request.
+// get issues a signed GET request with params in the query string.
 func (c *Client) get(path string, params url.Values) ([]byte, error) {
 	if params == nil {
 		params = url.Values{}
 	}
 	c.sign(params)
-
 	req, err := http.NewRequest(http.MethodGet,
 		fmt.Sprintf("%s%s?%s", c.baseURL, path, params.Encode()), nil)
 	if err != nil {
@@ -86,19 +84,35 @@ func (c *Client) get(path string, params url.Values) ([]byte, error) {
 	return c.doRequest(req, path)
 }
 
-// post performs an authenticated POST request.
+// post issues a signed POST request with params in the query string.
+// Binance Futures order placement uses POST with query-string params, not a JSON body.
 func (c *Client) post(path string, params url.Values) ([]byte, error) {
 	if params == nil {
 		params = url.Values{}
 	}
 	c.sign(params)
-
 	req, err := http.NewRequest(http.MethodPost,
 		fmt.Sprintf("%s%s", c.baseURL, path), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.URL.RawQuery = params.Encode()
+	req.Header.Set("X-MBX-APIKEY", c.apiKey)
+	return c.doRequest(req, path)
+}
+
+// delete issues a signed DELETE request. Binance Futures uses DELETE for
+// all order-cancellation endpoints.
+func (c *Client) delete(path string, params url.Values) ([]byte, error) {
+	if params == nil {
+		params = url.Values{}
+	}
+	c.sign(params)
+	req, err := http.NewRequest(http.MethodDelete,
+		fmt.Sprintf("%s%s?%s", c.baseURL, path, params.Encode()), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
 	req.Header.Set("X-MBX-APIKEY", c.apiKey)
 	return c.doRequest(req, path)
 }

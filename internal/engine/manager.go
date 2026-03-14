@@ -9,22 +9,28 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// symbolState holds per-symbol mutable state. The embedded mutex ensures that
+// concurrent WebSocket ticks for the same symbol are serialised, while ticks
+// for different symbols run in parallel.
 type symbolState struct {
 	sync.Mutex
-	buffer         *PriceBuffer
-	history        []models.Candle // Stores completed candles for the dashboard
-	currentCandle  *models.Candle
+	buffer        *PriceBuffer
+	history       []models.Candle
+	currentCandle *models.Candle
 	lastSignalType string
 	lastSignalTime time.Time
-	signalHistory  []models.Signal // Stores recent predictions/signals
+	signalHistory  []models.Signal
 }
 
+// EngineManager routes price ticks to per-symbol state, aggregates them into
+// OHLCV candles, and dispatches signals to the Signals channel on bar close.
+// It is safe for concurrent use.
 type EngineManager struct {
 	states      map[string]*symbolState
 	Strategy    Strategy
 	Signals     chan models.Signal
 	Trader      Trader
-	BarInterval time.Duration // Candle aggregation interval (default: 1 minute)
+	BarInterval time.Duration
 }
 
 func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trader Trader) *EngineManager {
@@ -35,7 +41,6 @@ func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trade
 		Trader:      trader,
 		BarInterval: time.Minute,
 	}
-	
 	for _, s := range symbols {
 		mgr.states[s] = &symbolState{
 			buffer:  NewPriceBuffer(bufferSize),
@@ -45,6 +50,9 @@ func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trade
 	return mgr
 }
 
+// UpdatePrice processes a single market tick: updates open trades via the
+// trader, aggregates into the current candle, and on bar close runs the
+// strategy and dispatches any resulting signal.
 func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	point, err := tick.ToPricePoint()
 	if err != nil {
@@ -56,6 +64,9 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 		return fmt.Errorf("received data for untracked symbol: %s", tick.Symbol)
 	}
 
+	// UpdateMetrics is called outside the symbol lock because it acquires its
+	// own internal lock. Calling it inside would create a lock ordering hazard
+	// if the trader ever calls back into the engine.
 	if m.Trader != nil {
 		m.Trader.UpdateMetrics(tick.Symbol, point.Price, point.Timestamp)
 	}
@@ -63,20 +74,18 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	state.Lock()
 	defer state.Unlock()
 
-	curr := state.currentCandle
 	tickTime := point.Timestamp.Truncate(m.BarInterval)
+	curr := state.currentCandle
 
 	if curr == nil || tickTime.After(curr.Time) {
 		if curr != nil {
 			state.buffer.Add(curr.Close)
-			// Store the completed candle in history
 			state.history = append(state.history, *curr)
 			if len(state.history) > state.buffer.size {
 				state.history = state.history[1:]
 			}
 			m.analyzeInternal(tick.Symbol, state)
 		}
-
 		state.currentCandle = &models.Candle{
 			Symbol: tick.Symbol,
 			Open:   point.Price,
@@ -85,7 +94,7 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 			Close:  point.Price,
 			Time:   tickTime,
 		}
-		log.Debug().Str("symbol", tick.Symbol).Time("time", tickTime).Msg("New candle started")
+		log.Debug().Str("symbol", tick.Symbol).Time("time", tickTime).Msg("New candle opened")
 	} else {
 		if point.Price.GreaterThan(curr.High) {
 			curr.High = point.Price
@@ -99,30 +108,38 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	return nil
 }
 
-// analyzeInternal runs the strategy and records signals
+// analyzeInternal runs the strategy on the completed bar's price history and
+// forwards any new signal to the Signals channel. Signal deduplication prevents
+// flooding during sustained trends: the same direction is suppressed for 5
+// minutes unless the direction changes.
+//
+// Must be called with state.Lock held.
 func (m *EngineManager) analyzeInternal(symbol string, state *symbolState) {
 	history := state.buffer.GetHistory()
-	if signal := m.Strategy.Analyze(symbol, history); signal != nil {
-		// Store in history for dashboard
-		state.signalHistory = append(state.signalHistory, *signal)
-		if len(state.signalHistory) > 100 {
-			state.signalHistory = state.signalHistory[1:]
-		}
+	signal := m.Strategy.Analyze(symbol, history)
+	if signal == nil {
+		return
+	}
 
-		if signal.Direction != state.lastSignalType || time.Since(state.lastSignalTime) > 5*time.Minute {
-			state.lastSignalType = signal.Direction
-			state.lastSignalTime = time.Now()
-			
-			select {
-			case m.Signals <- *signal:
-			default:
-				log.Warn().Str("symbol", symbol).Msg("Signal channel full. Dropping signal")
-			}
+	state.signalHistory = append(state.signalHistory, *signal)
+	if len(state.signalHistory) > 100 {
+		state.signalHistory = state.signalHistory[1:]
+	}
+
+	if signal.Direction != state.lastSignalType || time.Since(state.lastSignalTime) > 5*time.Minute {
+		state.lastSignalType = signal.Direction
+		state.lastSignalTime = time.Now()
+		select {
+		case m.Signals <- *signal:
+		default:
+			log.Warn().Str("symbol", symbol).Msg("Signal channel full; signal dropped")
 		}
 	}
 }
 
-// GetCandles returns the recent OHLCV history for a symbol
+// GetCandles returns completed candle history plus the current forming candle.
+// The current candle is appended as the last element so callers always see
+// the live bar without a separate API call.
 func (m *EngineManager) GetCandles(symbol string) []models.Candle {
 	state, exists := m.states[symbol]
 	if !exists {
@@ -131,7 +148,6 @@ func (m *EngineManager) GetCandles(symbol string) []models.Candle {
 	state.Lock()
 	defer state.Unlock()
 
-	// Return a copy of history + the current forming candle
 	total := len(state.history)
 	if state.currentCandle != nil {
 		total++
@@ -143,7 +159,8 @@ func (m *EngineManager) GetCandles(symbol string) []models.Candle {
 	}
 	return res
 }
-// GetSignals returns the recent signal history for a symbol
+
+// GetSignals returns the most recent signal history for a symbol (up to 100 entries).
 func (m *EngineManager) GetSignals(symbol string) []models.Signal {
 	state, exists := m.states[symbol]
 	if !exists {

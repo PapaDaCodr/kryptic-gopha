@@ -9,12 +9,17 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Strategy defines the interface for trading algorithms
+// Strategy is the interface every trading algorithm must satisfy.
+// Analyze is called on every completed bar with the symbol's full price
+// history. Return nil when no trade is warranted.
 type Strategy interface {
 	Analyze(symbol string, prices []decimal.Decimal) *models.Signal
 }
 
-// EMAStrategy is a basic but effective trend-following strategy
+// EMAStrategy is a simple EMA-crossover strategy kept for reference and
+// backtesting comparisons. It is not recommended for live use: it lacks
+// a macro trend filter and emits signals at constant confidence regardless
+// of market context.
 type EMAStrategy struct {
 	ShortPeriod int
 	LongPeriod  int
@@ -29,54 +34,62 @@ func (s *EMAStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.S
 	shortEMA := calculateEMA(prices, s.ShortPeriod)
 	longEMA := calculateEMA(prices, s.LongPeriod)
 
-	// Bullish Crossover: shortEMA > longEMA*(1+s.Threshold)
-	thresholdMultiplier := decimal.NewFromInt(1).Add(s.Threshold)
-	if shortEMA.GreaterThan(longEMA.Mul(thresholdMultiplier)) {
-		price := prices[len(prices)-1]
+	thresholdMul := decimal.NewFromInt(1).Add(s.Threshold)
+	if shortEMA.GreaterThan(longEMA.Mul(thresholdMul)) {
 		return &models.Signal{
 			Symbol:     symbol,
-			Price:      price,
+			Price:      prices[len(prices)-1],
 			Direction:  "BUY",
 			Reason:     "EMA Bullish Crossover",
 			Confidence: 0.75,
 			Timestamp:  time.Now(),
-			TP:         price.Mul(decimal.NewFromFloat(1.05)),
-			SL:         price.Mul(decimal.NewFromFloat(0.98)),
 		}
 	}
 
-	// Bearish Crossover: shortEMA < longEMA*(1-s.Threshold)
-	thresholdMultiplierSell := decimal.NewFromInt(1).Sub(s.Threshold)
-	if shortEMA.LessThan(longEMA.Mul(thresholdMultiplierSell)) {
-		price := prices[len(prices)-1]
+	thresholdMulSell := decimal.NewFromInt(1).Sub(s.Threshold)
+	if shortEMA.LessThan(longEMA.Mul(thresholdMulSell)) {
 		return &models.Signal{
 			Symbol:     symbol,
-			Price:      price,
+			Price:      prices[len(prices)-1],
 			Direction:  "SELL",
 			Reason:     "EMA Bearish Crossover",
 			Confidence: 0.75,
 			Timestamp:  time.Now(),
-			TP:         price.Mul(decimal.NewFromFloat(0.95)),
-			SL:         price.Mul(decimal.NewFromFloat(1.02)),
 		}
 	}
 
 	return nil
 }
 
-// EfficientMultiFactorStrategy optimizes for high-frequency updates by maintaining
-// internal state for recursive calculations. This reduces indicator calculation
-// complexity from O(N) to O(1) per tick, where N is the lookback period.
+// EfficientMultiFactorStrategy is the production strategy. It uses three
+// complementary filters:
 //
-// It is safe for concurrent use across multiple symbols.
+//  1. Macro trend filter: price must be on the correct side of the 200-period
+//     EMA. This suppresses counter-trend entries and is the highest-value
+//     single filter in the system.
+//
+//  2. Entry trigger: short EMA crosses long EMA in the direction of the macro
+//     trend (equivalent to a MACD signal-line crossover with 12/26/9 defaults).
+//
+//  3. Momentum gate: RSI(14) must be below 70 for longs and above 30 for
+//     shorts to avoid entering near exhaustion points.
+//
+// All indicator state is maintained incrementally (O(1) per bar) using
+// Wilder's exponential smoothing for RSI and the standard EMA recurrence
+// relation. A full recalculation is performed only on first contact with a
+// new symbol.
+//
+// Concurrency: each symbol has its own mutex so BTCUSDT and ETHUSDT analysis
+// can proceed in parallel. The top-level mu protects only the symMu map.
 type EfficientMultiFactorStrategy struct {
 	ShortPeriod int
 	LongPeriod  int
 	RSIPeriod   int
-	MacroPeriod int // Standard 200 EMA to filter counter-trend signals
+	MacroPeriod int
 
 	mu          sync.Mutex
-	lastEMA     map[string]map[int]decimal.Decimal // symbol -> period -> lastValue
+	symMu       map[string]*sync.Mutex
+	lastEMA     map[string]map[int]decimal.Decimal
 	lastAvgGain map[string]decimal.Decimal
 	lastAvgLoss map[string]decimal.Decimal
 	initialized map[string]bool
@@ -88,6 +101,7 @@ func NewEfficientStrategy(short, long, rsi int) *EfficientMultiFactorStrategy {
 		LongPeriod:  long,
 		RSIPeriod:   rsi,
 		MacroPeriod: 200,
+		symMu:       make(map[string]*sync.Mutex),
 		lastEMA:     make(map[string]map[int]decimal.Decimal),
 		lastAvgGain: make(map[string]decimal.Decimal),
 		lastAvgLoss: make(map[string]decimal.Decimal),
@@ -95,9 +109,21 @@ func NewEfficientStrategy(short, long, rsi int) *EfficientMultiFactorStrategy {
 	}
 }
 
-func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.Signal {
+// symbolLock returns the per-symbol mutex, creating it on first access.
+// The global mu protects only the symMu map entry creation.
+func (s *EfficientMultiFactorStrategy) symbolLock(symbol string) *sync.Mutex {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.symMu[symbol] == nil {
+		s.symMu[symbol] = &sync.Mutex{}
+	}
+	return s.symMu[symbol]
+}
+
+func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.Decimal) *models.Signal {
+	mu := s.symbolLock(symbol)
+	mu.Lock()
+	defer mu.Unlock()
 
 	if len(prices) < s.MacroPeriod || len(prices) < s.RSIPeriod+1 {
 		return nil
@@ -105,46 +131,41 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 
 	currentPrice := prices[len(prices)-1]
 
-	// Handle Initialization
 	if _, ok := s.lastEMA[symbol]; !ok {
 		s.lastEMA[symbol] = make(map[int]decimal.Decimal)
-		s.lastEMA[symbol][s.ShortPeriod] = calculateEMA(prices[:len(prices)-1], s.ShortPeriod)
-		s.lastEMA[symbol][s.LongPeriod] = calculateEMA(prices[:len(prices)-1], s.LongPeriod)
-		s.lastEMA[symbol][s.MacroPeriod] = calculateEMA(prices[:len(prices)-1], s.MacroPeriod)
-		s.initRSI(symbol, prices[:len(prices)-1])
+		warmup := prices[:len(prices)-1]
+		s.lastEMA[symbol][s.ShortPeriod] = calculateEMA(warmup, s.ShortPeriod)
+		s.lastEMA[symbol][s.LongPeriod] = calculateEMA(warmup, s.LongPeriod)
+		s.lastEMA[symbol][s.MacroPeriod] = calculateEMA(warmup, s.MacroPeriod)
+		s.initRSI(symbol, warmup)
 	}
 
 	shortEMA := updateEMA(s.lastEMA[symbol][s.ShortPeriod], currentPrice, s.ShortPeriod)
 	longEMA := updateEMA(s.lastEMA[symbol][s.LongPeriod], currentPrice, s.LongPeriod)
 	macroEMA := updateEMA(s.lastEMA[symbol][s.MacroPeriod], currentPrice, s.MacroPeriod)
-	
 	s.lastEMA[symbol][s.ShortPeriod] = shortEMA
 	s.lastEMA[symbol][s.LongPeriod] = longEMA
 	s.lastEMA[symbol][s.MacroPeriod] = macroEMA
 
 	rsi := s.calculateIncrementalRSI(symbol, prices)
 	rsiFloat, _ := rsi.Float64()
-	
-	confidence := 0.5 + (0.4 * (func(v float64) float64 {
-		if v > 50 { return (v - 50) / 50 }
-		return (50 - v) / 50
-	}(rsiFloat)))
 
-	// Strategic Optimization:
-	// 1. MACRO TREND FILTER: Price MUST be on the right side of the 200 EMA.
-	// 2. ENTRY TRIGGER: Short EMA crosses Long EMA in the direction of the Macro Trend.
-	// 3. MOMENTUM FILTER: RSI prevents buying at the absolute top or selling at the bottom.
-
-	isBullMarket := currentPrice.GreaterThan(macroEMA)
-	isBearMarket := currentPrice.LessThan(macroEMA)
-
-	// Clamp boosted confidence to [0, 1].
+	// Confidence is anchored at 0.5 and scaled by RSI distance from 50.
+	// RSI near an extreme (0 or 100) adds up to 0.4 to confidence; RSI at
+	// exactly 50 (no momentum) contributes nothing.
+	rsiDeviation := rsiFloat - 50
+	if rsiDeviation < 0 {
+		rsiDeviation = -rsiDeviation
+	}
+	confidence := 0.5 + (0.4 * (rsiDeviation / 50))
 	boosted := confidence * 1.2
 	if boosted > 1.0 {
 		boosted = 1.0
 	}
 
-	// BUY Condition: Bull Market + Bullish Cross + RSI Not Overbought (< 70)
+	isBullMarket := currentPrice.GreaterThan(macroEMA)
+	isBearMarket := currentPrice.LessThan(macroEMA)
+
 	if isBullMarket && shortEMA.GreaterThan(longEMA) && rsiFloat < 70 {
 		return &models.Signal{
 			Symbol:     symbol,
@@ -153,12 +174,9 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 			Reason:     fmt.Sprintf("Trend:UP (+200EMA) | RSI:%.2f", rsiFloat),
 			Confidence: boosted,
 			Timestamp:  time.Now(),
-			TP:         currentPrice.Mul(decimal.NewFromFloat(1.05)),
-			SL:         currentPrice.Mul(decimal.NewFromFloat(0.98)),
 		}
 	}
 
-	// SELL Condition: Bear Market + Bearish Cross + RSI Not Oversold (> 30)
 	if isBearMarket && shortEMA.LessThan(longEMA) && rsiFloat > 30 {
 		return &models.Signal{
 			Symbol:     symbol,
@@ -167,24 +185,40 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, prices []decimal.D
 			Reason:     fmt.Sprintf("Trend:DOWN (-200EMA) | RSI:%.2f", rsiFloat),
 			Confidence: boosted,
 			Timestamp:  time.Now(),
-			TP:         currentPrice.Mul(decimal.NewFromFloat(0.95)),
-			SL:         currentPrice.Mul(decimal.NewFromFloat(1.02)),
 		}
 	}
 
 	return nil
 }
 
+// updateEMA applies the standard EMA recurrence: EMA = prev + k*(price - prev)
+// where k = 2/(period+1). O(1) per call.
 func updateEMA(prevEMA, currentPrice decimal.Decimal, period int) decimal.Decimal {
 	multiplier := decimal.NewFromFloat(2.0 / (float64(period) + 1.0))
 	return currentPrice.Sub(prevEMA).Mul(multiplier).Add(prevEMA)
 }
 
+// calculateEMA seeds the EMA over a full price slice. Only called once per
+// symbol at initialisation; all subsequent updates use updateEMA.
+func calculateEMA(prices []decimal.Decimal, period int) decimal.Decimal {
+	if len(prices) == 0 {
+		return decimal.Zero
+	}
+	multiplier := decimal.NewFromFloat(2.0 / (float64(period) + 1.0))
+	ema := prices[0]
+	for i := 1; i < len(prices); i++ {
+		ema = prices[i].Sub(ema).Mul(multiplier).Add(ema)
+	}
+	return ema
+}
+
+// initRSI seeds avgGain and avgLoss using Wilder's initial SMA, then applies
+// Wilder's smoothing over all remaining prices to bring state current.
+// Only called once per symbol.
 func (s *EfficientMultiFactorStrategy) initRSI(symbol string, prices []decimal.Decimal) {
 	if len(prices) < s.RSIPeriod+1 {
 		return
 	}
-
 	totalGain := decimal.Zero
 	totalLoss := decimal.Zero
 	for i := 1; i <= s.RSIPeriod; i++ {
@@ -195,13 +229,10 @@ func (s *EfficientMultiFactorStrategy) initRSI(symbol string, prices []decimal.D
 			totalLoss = totalLoss.Sub(change)
 		}
 	}
-
-	s.lastAvgGain[symbol] = totalGain.Div(decimal.NewFromInt(int64(s.RSIPeriod)))
-	s.lastAvgLoss[symbol] = totalLoss.Div(decimal.NewFromInt(int64(s.RSIPeriod)))
-
-	// Process remaining prices to catch up state
-	rsiPeriodDec := decimal.NewFromInt(int64(s.RSIPeriod))
-	rsiMinusOneDec := decimal.NewFromInt(int64(s.RSIPeriod - 1))
+	n := decimal.NewFromInt(int64(s.RSIPeriod))
+	nm1 := decimal.NewFromInt(int64(s.RSIPeriod - 1))
+	s.lastAvgGain[symbol] = totalGain.Div(n)
+	s.lastAvgLoss[symbol] = totalLoss.Div(n)
 
 	for i := s.RSIPeriod + 1; i < len(prices); i++ {
 		change := prices[i].Sub(prices[i-1])
@@ -211,54 +242,35 @@ func (s *EfficientMultiFactorStrategy) initRSI(symbol string, prices []decimal.D
 		} else {
 			loss = change.Neg()
 		}
-		s.lastAvgGain[symbol] = s.lastAvgGain[symbol].Mul(rsiMinusOneDec).Add(gain).Div(rsiPeriodDec)
-		s.lastAvgLoss[symbol] = s.lastAvgLoss[symbol].Mul(rsiMinusOneDec).Add(loss).Div(rsiPeriodDec)
+		s.lastAvgGain[symbol] = s.lastAvgGain[symbol].Mul(nm1).Add(gain).Div(n)
+		s.lastAvgLoss[symbol] = s.lastAvgLoss[symbol].Mul(nm1).Add(loss).Div(n)
 	}
 	s.initialized[symbol] = true
 }
 
+// calculateIncrementalRSI advances the Wilder-smoothed RSI by one bar.
+// On the first call for a symbol it falls through to initRSI for full seeding.
 func (s *EfficientMultiFactorStrategy) calculateIncrementalRSI(symbol string, prices []decimal.Decimal) decimal.Decimal {
-	rsiPeriodDec := decimal.NewFromInt(int64(s.RSIPeriod))
-	rsiMinusOneDec := decimal.NewFromInt(int64(s.RSIPeriod - 1))
+	n := decimal.NewFromInt(int64(s.RSIPeriod))
+	nm1 := decimal.NewFromInt(int64(s.RSIPeriod - 1))
 
 	if !s.initialized[symbol] {
 		s.initRSI(symbol, prices)
 	} else {
-		currIdx := len(prices) - 1
-		prevIdx := len(prices) - 2
-		change := prices[currIdx].Sub(prices[prevIdx])
-		
+		change := prices[len(prices)-1].Sub(prices[len(prices)-2])
 		gain, loss := decimal.Zero, decimal.Zero
 		if change.IsPositive() {
 			gain = change
 		} else {
 			loss = change.Neg()
 		}
-
-		s.lastAvgGain[symbol] = s.lastAvgGain[symbol].Mul(rsiMinusOneDec).Add(gain).Div(rsiPeriodDec)
-		s.lastAvgLoss[symbol] = s.lastAvgLoss[symbol].Mul(rsiMinusOneDec).Add(loss).Div(rsiPeriodDec)
+		s.lastAvgGain[symbol] = s.lastAvgGain[symbol].Mul(nm1).Add(gain).Div(n)
+		s.lastAvgLoss[symbol] = s.lastAvgLoss[symbol].Mul(nm1).Add(loss).Div(n)
 	}
 
 	if s.lastAvgLoss[symbol].IsZero() {
 		return decimal.NewFromInt(100)
 	}
-
 	rs := s.lastAvgGain[symbol].Div(s.lastAvgLoss[symbol])
-	// 100 - (100 / (1 + rs))
 	return decimal.NewFromInt(100).Sub(decimal.NewFromInt(100).Div(decimal.NewFromInt(1).Add(rs)))
 }
-
-func calculateEMA(prices []decimal.Decimal, period int) decimal.Decimal {
-	if len(prices) == 0 {
-		return decimal.Zero
-	}
-	
-	multiplier := decimal.NewFromFloat(2.0 / (float64(period) + 1.0))
-	ema := prices[0]
-	
-	for i := 1; i < len(prices); i++ {
-		ema = prices[i].Sub(ema).Mul(multiplier).Add(ema)
-	}
-	return ema
-}
-
