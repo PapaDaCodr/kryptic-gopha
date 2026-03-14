@@ -6,46 +6,68 @@ A concurrent algorithmic trading engine written in Go, targeting Binance USDT-M 
 
 ## Architecture
 
-```
-cmd/
-  server/       — Main server process (paper + live modes)
-  backtester/   — CLI tool for historical simulation
+```mermaid
+graph TD
+    subgraph cmd
+        SRV[server<br/>paper + live modes]
+        BT[backtester<br/>historical simulation]
+    end
 
-internal/
-  engine/       — Core trading loop: strategy, candle aggregation, position management
-  exchange/     — Authenticated Binance Futures REST client
-  ingester/     — Binance WebSocket stream consumer + historical klines fetcher
-  models/       — Domain types: MarketTick, Signal, Candle
+    subgraph internal
+        ENG[engine<br/>strategy · candle aggregation · position management]
+        EXC[exchange<br/>Binance Futures REST client]
+        ING[ingester<br/>WebSocket stream · historical klines]
+        MDL[models<br/>MarketTick · Signal · Candle]
+    end
 
-pkg/
-  notifier/     — Telegram bot: async notifications + command listener
+    subgraph pkg
+        NOT[notifier<br/>Telegram bot]
+    end
 
-web/            — Dashboard frontend (HTML/JS/CSS)
-research/       — Strategy research and analysis documents
+    WEB[web<br/>dashboard frontend]
+    RES[research<br/>strategy analysis]
+
+    SRV --> ENG
+    SRV --> EXC
+    SRV --> ING
+    SRV --> NOT
+    BT  --> ENG
+    BT  --> ING
+    ENG --> MDL
+    EXC --> MDL
 ```
 
 ### Data Flow
 
-```
-Binance WS Stream
-      │
-      ▼
-   Ingester  ──── tick ────►  EngineManager
-                                    │
-                          ┌─────────┼──────────┐
-                          ▼         ▼           ▼
-                      Candle    Trader        Strategy
-                    Aggregation UpdateMetrics  Analyze
-                          │                     │
-                          │                   Signal
-                          │                 (with ATR)
-                          └─────────────────────►
-                                                 │
-                                            Trader.OnSignal
-                                                 │
-                                      ATR-sized position
-                                      Exchange Orders (live)
-                                      Simulated P&L (paper)
+```mermaid
+sequenceDiagram
+    participant WS as Binance WS Stream
+    participant IN as Ingester
+    participant EM as EngineManager
+    participant CA as Candle Aggregator
+    participant ST as Strategy
+    participant TR as Trader
+
+    WS->>IN: raw trade events
+    IN->>EM: MarketTick per symbol
+
+    EM->>TR: UpdateMetrics (price, time)
+    Note over TR: check SL / TP / trailing stop<br/>on all open positions
+
+    EM->>CA: accumulate tick into current bar
+    Note over CA: on bar close →
+
+    CA->>ST: Analyze(symbol, []Candle)
+    Note over ST: EMA(200) macro filter<br/>ADX(14) > 25 regime gate<br/>EMA(12/26) crossover<br/>RSI(14) momentum gate<br/>Volume > 1.2× EMA20(vol)
+
+    ST-->>EM: Signal{Direction, Price, ATR}
+    EM->>TR: OnSignal
+
+    alt live mode
+        TR->>TR: size position via ATR<br/>place bracket orders on exchange
+    else paper mode
+        TR->>TR: simulate P&L<br/>update balance
+    end
 ```
 
 ---
