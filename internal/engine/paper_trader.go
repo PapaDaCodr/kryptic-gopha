@@ -13,34 +13,42 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Trade is a single position record, shared between PaperTrader and LiveTrader.
-// TPOrderID / SLOrderID are populated only by LiveTrader and hold the Binance
-// order IDs of the bracket orders placed at entry. They are used to cancel
-// the correct bracket when the position closes, without disturbing other open
-// orders on the same symbol.
+// atrSLMultiplier controls how many ATR units the dynamic stop-loss is placed
+// away from entry. 1.5x is a common convention that balances noise tolerance
+// against capital efficiency.
+const atrSLMultiplier = 1.5
+
+// Trade is a single position record shared by PaperTrader and LiveTrader.
+//
+// DynamicSLPrice: when non-zero, this is the absolute stop-loss price
+// computed as entry ± (atrSLMultiplier × ATR) at signal time. UpdateMetrics
+// uses this level instead of the configured SL percentage, making the stop
+// adaptive to the market's current volatility. When zero (ATR unavailable),
+// the configured SL percentage is used as a fallback.
+//
+// TPOrderID / SLOrderID: Binance order IDs for the bracket orders placed at
+// entry. Used by LiveTrader to cancel only the specific bracket belonging to
+// this trade when the position closes, avoiding cancellation of other open
+// positions on the same symbol.
 type Trade struct {
-	Symbol        string                  `json:"symbol"`
-	EntryPrice    decimal.Decimal         `json:"entry_price"`
-	Quantity      decimal.Decimal         `json:"quantity"`
-	Direction     string                  `json:"direction"`
-	Time          time.Time               `json:"time"`
-	Exits         map[int]decimal.Decimal `json:"exits"`
-	Status        string                  `json:"status"`
-	ExitPrice     decimal.Decimal         `json:"exit_price"`
-	PnL           decimal.Decimal         `json:"pnl"`
-	HighWaterMark decimal.Decimal         `json:"high_water_mark"`
-	ExitReason    string                  `json:"exit_reason"`
-	TPOrderID     int64                   `json:"tp_order_id,omitempty"`
-	SLOrderID     int64                   `json:"sl_order_id,omitempty"`
+	Symbol          string                  `json:"symbol"`
+	EntryPrice      decimal.Decimal         `json:"entry_price"`
+	Quantity        decimal.Decimal         `json:"quantity"`
+	Direction       string                  `json:"direction"`
+	Time            time.Time               `json:"time"`
+	Exits           map[int]decimal.Decimal `json:"exits"`
+	Status          string                  `json:"status"`
+	ExitPrice       decimal.Decimal         `json:"exit_price"`
+	PnL             decimal.Decimal         `json:"pnl"`
+	HighWaterMark   decimal.Decimal         `json:"high_water_mark"`
+	ExitReason      string                  `json:"exit_reason"`
+	DynamicSLPrice  decimal.Decimal         `json:"dynamic_sl_price,omitempty"`
+	TPOrderID       int64                   `json:"tp_order_id,omitempty"`
+	SLOrderID       int64                   `json:"sl_order_id,omitempty"`
 }
 
 // PaperTrader simulates trade execution against live market data without
-// placing real orders. It is the default trading mode and the backend for
-// the backtester.
-//
-// The embedded sync.Mutex is intentionally unexported-by-convention: callers
-// outside this package should only interact through the Trader interface methods,
-// each of which acquires the lock internally.
+// placing real orders. It is the default mode and serves as the backtester backend.
 type PaperTrader struct {
 	sync.Mutex
 	ActiveTrades map[string][]*Trade `json:"active_trades"`
@@ -104,20 +112,42 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		return
 	}
 
-	// Position size = (balance * risk%) / (entry_price * sl%)
-	// Losses are bounded to RiskPerTrade regardless of how far SL is set.
 	riskAmount := p.Balance.Mul(p.RiskPerTrade)
-	quantity := riskAmount.Div(sig.Price.Mul(p.SL))
+
+	var quantity decimal.Decimal
+	var dynamicSLPrice decimal.Decimal
+
+	if !sig.ATR.IsZero() {
+		// ATR-based sizing: risk amount / (atrSLMultiplier × ATR).
+		// Quantity is independent of entry price, which correctly accounts
+		// for the volatility of the current regime.
+		slDistance := sig.ATR.Mul(decimal.NewFromFloat(atrSLMultiplier))
+		quantity = riskAmount.Div(slDistance)
+
+		// Store absolute SL level so UpdateMetrics does not need the ATR again.
+		one := decimal.NewFromInt(1)
+		if sig.Direction == "BUY" {
+			dynamicSLPrice = sig.Price.Sub(slDistance)
+		} else {
+			_ = one
+			dynamicSLPrice = sig.Price.Add(slDistance)
+		}
+	} else {
+		// Fallback to fixed-percentage sizing when ATR is unavailable (e.g.
+		// insufficient history during warm-up).
+		quantity = riskAmount.Div(sig.Price.Mul(p.SL))
+	}
 
 	trade := &Trade{
-		Symbol:        sig.Symbol,
-		EntryPrice:    sig.Price,
-		Quantity:      quantity,
-		Direction:     sig.Direction,
-		Time:          sig.Timestamp,
-		Exits:         make(map[int]decimal.Decimal),
-		Status:        "ACTIVE",
-		HighWaterMark: sig.Price,
+		Symbol:         sig.Symbol,
+		EntryPrice:     sig.Price,
+		Quantity:       quantity,
+		Direction:      sig.Direction,
+		Time:           sig.Timestamp,
+		Exits:          make(map[int]decimal.Decimal),
+		Status:         "ACTIVE",
+		HighWaterMark:  sig.Price,
+		DynamicSLPrice: dynamicSLPrice,
 	}
 	p.ActiveTrades[sig.Symbol] = append(p.ActiveTrades[sig.Symbol], trade)
 
@@ -126,6 +156,7 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		Str("direction", sig.Direction).
 		Str("price", sig.Price.String()).
 		Str("quantity", quantity.StringFixed(4)).
+		Str("sl_price", dynamicSLPrice.String()).
 		Msg("Paper trade opened")
 
 	if p.Notifier != nil {
@@ -157,6 +188,7 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 		isLoss := false
 		exitReason := ""
 
+		// TP check (always percentage-based).
 		if t.Direction == "BUY" {
 			if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(p.TP))) {
 				isWin, exitReason = true, "TP_HIT"
@@ -169,8 +201,8 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 
 		if !isWin {
 			if p.TrailingSL {
-				// Stop level trails the high-water mark, not the entry price.
-				// A TRAILING_SL exit above entry is counted as a win.
+				// Trailing stop trails the high-water mark. An exit above entry
+				// is counted as a win even if the trailing stop triggered.
 				if t.Direction == "BUY" {
 					trailStop := t.HighWaterMark.Mul(one.Sub(p.TrailingSLPct))
 					if currentPrice.LessThanOrEqual(trailStop) {
@@ -187,13 +219,23 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 					}
 				}
 			} else {
-				if t.Direction == "BUY" {
-					if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(one.Sub(p.SL))) {
-						isLoss, exitReason = true, "FIXED_SL"
+				// Use ATR-derived absolute SL level when available, otherwise
+				// fall back to the configured fixed percentage.
+				if !t.DynamicSLPrice.IsZero() {
+					if t.Direction == "BUY" && currentPrice.LessThanOrEqual(t.DynamicSLPrice) {
+						isLoss, exitReason = true, "ATR_SL"
+					} else if t.Direction == "SELL" && currentPrice.GreaterThanOrEqual(t.DynamicSLPrice) {
+						isLoss, exitReason = true, "ATR_SL"
 					}
 				} else {
-					if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(p.SL))) {
-						isLoss, exitReason = true, "FIXED_SL"
+					if t.Direction == "BUY" {
+						if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(one.Sub(p.SL))) {
+							isLoss, exitReason = true, "FIXED_SL"
+						}
+					} else {
+						if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(p.SL))) {
+							isLoss, exitReason = true, "FIXED_SL"
+						}
 					}
 				}
 			}
@@ -205,15 +247,14 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 			continue
 		}
 
-		// Snapshot the price at fixed intervals for performance attribution.
-		// The 10-minute snapshot doubles as the time-based exit trigger.
+		// Snapshot price at fixed intervals for attribution. The 10-minute
+		// snapshot doubles as the time-based exit trigger.
 		duration := now.Sub(t.Time).Minutes()
 		for _, interval := range []int{1, 5, 10} {
 			if duration >= float64(interval) && t.Exits[interval].IsZero() {
 				t.Exits[interval] = currentPrice
 			}
 		}
-
 		if !t.Exits[10].IsZero() {
 			isWinAt10 := (t.Direction == "BUY" && currentPrice.GreaterThan(t.EntryPrice)) ||
 				(t.Direction == "SELL" && currentPrice.LessThan(t.EntryPrice))
@@ -232,8 +273,8 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 	}
 }
 
-// closeTrade finalises a position, updates accounting, and fires the circuit
-// breaker if the daily loss limit is breached. Must be called with p.Lock held.
+// closeTrade finalises a position and fires the circuit breaker when the daily
+// loss limit is breached. Must be called with p.Lock held.
 func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin bool) {
 	if isWin {
 		t.Status = "WIN"
@@ -295,9 +336,7 @@ func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin b
 func (p *PaperTrader) checkDailyReset() {
 	now := time.Now()
 	if now.YearDay() != p.LastDailyReset.YearDay() || now.Year() != p.LastDailyReset.Year() {
-		log.Info().
-			Str("prev_daily_pnl", p.DailyPnL.StringFixed(2)).
-			Msg("Daily risk reset")
+		log.Info().Str("prev_daily_pnl", p.DailyPnL.StringFixed(2)).Msg("Daily risk reset")
 		p.DailyPnL = decimal.Zero
 		p.TradingEnabled = true
 		p.InitialBalance = p.Balance
@@ -336,9 +375,6 @@ func (p *PaperTrader) GetStats() TraderStats {
 	}
 }
 
-// GetState returns a deep-copied snapshot safe for JSON encoding without
-// holding the lock. Struct values are copied, not pointers, to prevent races
-// between the encoder and a concurrent UpdateMetrics call.
 func (p *PaperTrader) GetState() TraderState {
 	p.Lock()
 	defer p.Unlock()
@@ -396,9 +432,8 @@ func (p *PaperTrader) LoadState(filename string) error {
 	return json.Unmarshal(data, p)
 }
 
-// deepCopyActiveTrades returns a map of independent Trade copies. Each Trade
-// value is copied by struct value to ensure the snapshot cannot race with
-// in-flight UpdateMetrics mutations.
+// deepCopyActiveTrades returns a map of independent Trade copies. Struct values
+// are copied (not pointers) to prevent races between the encoder and UpdateMetrics.
 func deepCopyActiveTrades(src map[string][]*Trade) map[string][]*Trade {
 	dst := make(map[string][]*Trade, len(src))
 	for sym, trades := range src {

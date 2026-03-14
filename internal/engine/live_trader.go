@@ -19,14 +19,13 @@ import (
 //
 // Position lifecycle:
 //  1. OnSignal: entry MARKET → TP bracket → SL bracket. If either bracket
-//     fails, the entry is closed at market immediately. A live position is
-//     never left unprotected.
-//  2. UpdateMetrics: mirrors TP/SL locally for dashboard accuracy. When the
-//     local check triggers, it cancels only the bracket orders belonging to
-//     that specific trade (by order ID) to avoid disturbing concurrent
-//     positions on the same symbol.
-//  3. TIME_EXIT: places a closing MARKET order to actually close the position
-//     on-exchange, then cancels the remaining brackets.
+//     fails, the entry is closed at market immediately (emergencyClose). A
+//     live position is never left unprotected.
+//  2. UpdateMetrics: mirrors TP/SL locally for dashboard accuracy. When a
+//     local check triggers it cancels only the bracket orders for that specific
+//     trade (by stored order ID) — not all orders for the symbol.
+//  3. TIME_EXIT: places a closing MARKET order to actually close the on-exchange
+//     position, then cancels any remaining brackets.
 type LiveTrader struct {
 	mu sync.Mutex
 
@@ -52,7 +51,7 @@ type LiveTrader struct {
 }
 
 // NewLiveTrader constructs a LiveTrader. The starting balance is fetched from
-// Binance via SyncBalance; the fallbackBalance is used only if that call fails.
+// Binance via SyncBalance; fallbackBalance is used only if that call fails.
 func NewLiveTrader(client *exchange.Client, fallbackBalance float64) *LiveTrader {
 	bal := decimal.NewFromFloat(fallbackBalance)
 	return &LiveTrader{
@@ -120,16 +119,30 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 		return
 	}
 
+	// Position sizing: ATR-based when available, otherwise fixed-percentage.
 	riskAmount := lt.Balance.Mul(lt.RiskPerTrade)
-	rawQty := riskAmount.Div(sig.Price.Mul(lt.SL))
-	qty := exchange.RoundToStepSize(rawQty, info.StepSize)
+	var rawQty decimal.Decimal
+	var dynamicSLPrice decimal.Decimal
 
+	if !sig.ATR.IsZero() {
+		slDistance := sig.ATR.Mul(decimal.NewFromFloat(atrSLMultiplier))
+		rawQty = riskAmount.Div(slDistance)
+		if sig.Direction == "BUY" {
+			dynamicSLPrice = sig.Price.Sub(slDistance)
+		} else {
+			dynamicSLPrice = sig.Price.Add(slDistance)
+		}
+	} else {
+		rawQty = riskAmount.Div(sig.Price.Mul(lt.SL))
+	}
+
+	qty := exchange.RoundToStepSize(rawQty, info.StepSize)
 	if qty.LessThan(info.MinQty) {
 		log.Warn().Str("symbol", sig.Symbol).Str("qty", qty.String()).Msg("Qty below minimum; skipping trade")
 		return
 	}
 	if !info.MinNotional.IsZero() && qty.Mul(sig.Price).LessThan(info.MinNotional) {
-		log.Warn().Str("symbol", sig.Symbol).Str("notional", qty.Mul(sig.Price).StringFixed(2)).Msg("Notional below minimum; skipping trade")
+		log.Warn().Str("symbol", sig.Symbol).Msg("Notional below minimum; skipping trade")
 		return
 	}
 
@@ -149,16 +162,25 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 	executedQty := entryResult.ExecutedQty
 	one := decimal.NewFromInt(1)
 
-	var tpPrice, slPrice decimal.Decimal
-	if sig.Direction == "BUY" {
-		tpPrice = entryPrice.Mul(one.Add(lt.TP))
+	// Determine bracket prices. Prefer the ATR-derived SL level when available
+	// since it adapts to current volatility; fall back to the configured fixed %.
+	var slPrice decimal.Decimal
+	if !dynamicSLPrice.IsZero() {
+		slPrice = dynamicSLPrice
+	} else if sig.Direction == "BUY" {
 		slPrice = entryPrice.Mul(one.Sub(lt.SL))
 	} else {
-		tpPrice = entryPrice.Mul(one.Sub(lt.TP))
 		slPrice = entryPrice.Mul(one.Add(lt.SL))
 	}
 
-	// Place TP bracket. On failure, unwind the entry immediately.
+	var tpPrice decimal.Decimal
+	if sig.Direction == "BUY" {
+		tpPrice = entryPrice.Mul(one.Add(lt.TP))
+	} else {
+		tpPrice = entryPrice.Mul(one.Sub(lt.TP))
+	}
+
+	// Place TP bracket. On failure, immediately unwind the entry.
 	tpResult, err := lt.client.PlaceTakeProfitMarketOrder(sig.Symbol, exitSide, executedQty, tpPrice)
 	if err != nil {
 		log.Error().Err(err).Str("symbol", sig.Symbol).Msg("TP order failed — closing entry at market")
@@ -178,16 +200,17 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 	}
 
 	trade := &Trade{
-		Symbol:        sig.Symbol,
-		EntryPrice:    entryPrice,
-		Quantity:      executedQty,
-		Direction:     sig.Direction,
-		Time:          sig.Timestamp,
-		Exits:         make(map[int]decimal.Decimal),
-		Status:        "ACTIVE",
-		HighWaterMark: entryPrice,
-		TPOrderID:     tpResult.OrderID,
-		SLOrderID:     slResult.OrderID,
+		Symbol:         sig.Symbol,
+		EntryPrice:     entryPrice,
+		Quantity:       executedQty,
+		Direction:      sig.Direction,
+		Time:           sig.Timestamp,
+		Exits:          make(map[int]decimal.Decimal),
+		Status:         "ACTIVE",
+		HighWaterMark:  entryPrice,
+		DynamicSLPrice: dynamicSLPrice,
+		TPOrderID:      tpResult.OrderID,
+		SLOrderID:      slResult.OrderID,
 	}
 	lt.ActiveTrades[sig.Symbol] = append(lt.ActiveTrades[sig.Symbol], trade)
 
@@ -196,9 +219,8 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 		Str("direction", sig.Direction).
 		Str("price", entryPrice.String()).
 		Str("qty", executedQty.StringFixed(4)).
+		Str("sl_price", slPrice.String()).
 		Int64("order_id", entryResult.OrderID).
-		Int64("tp_order_id", tpResult.OrderID).
-		Int64("sl_order_id", slResult.OrderID).
 		Msg("Live trade opened")
 
 	if lt.Notifier != nil {
@@ -208,10 +230,9 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 	}
 }
 
-// UpdateMetrics mirrors the TP/SL evaluation locally so the dashboard stays
-// accurate. When a trade closes, it cancels only the bracket orders for that
-// specific trade using the stored order IDs, leaving other positions' brackets
-// untouched.
+// UpdateMetrics mirrors TP/SL checks locally for dashboard accuracy. When a
+// trade closes it cancels only the bracket orders for that trade by stored order
+// IDs, preserving brackets for any concurrent positions on the same symbol.
 func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal, now time.Time) {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
@@ -238,14 +259,20 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 		if t.Direction == "BUY" {
 			if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(lt.TP))) {
 				isWin, exitReason = true, "TP_HIT"
-			} else if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(one.Sub(lt.SL))) {
-				isLoss, exitReason = true, "SL_HIT"
+			} else {
+				slLevel := lt.slLevel(t, one)
+				if currentPrice.LessThanOrEqual(slLevel) {
+					isLoss, exitReason = true, "SL_HIT"
+				}
 			}
 		} else {
 			if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(one.Sub(lt.TP))) {
 				isWin, exitReason = true, "TP_HIT"
-			} else if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(lt.SL))) {
-				isLoss, exitReason = true, "SL_HIT"
+			} else {
+				slLevel := lt.slLevel(t, one)
+				if currentPrice.GreaterThanOrEqual(slLevel) {
+					isLoss, exitReason = true, "SL_HIT"
+				}
 			}
 		}
 
@@ -259,10 +286,9 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 		if isWin || isLoss {
 			t.ExitReason = exitReason
 
-			// For TIME_EXIT, the position is still open on-exchange and must be
-			// closed explicitly. TP/SL exits mean one bracket already executed;
-			// only the surviving bracket needs to be cancelled.
 			if exitReason == "TIME_EXIT" {
+				// TIME_EXIT: position still open on exchange — close at market,
+				// then cancel both bracket orders.
 				closeSide := exchange.SideSell
 				if t.Direction == "SELL" {
 					closeSide = exchange.SideBuy
@@ -277,17 +303,17 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 				}
 				lt.cancelTradeBrackets(symbol, t)
 			} else if exitReason == "TP_HIT" {
-				// TP bracket executed on exchange; cancel the now-orphaned SL bracket.
+				// TP bracket executed on exchange; cancel the orphaned SL bracket.
 				if t.SLOrderID != 0 {
 					if err := lt.client.CancelOrder(symbol, t.SLOrderID); err != nil {
-						log.Warn().Err(err).Int64("order_id", t.SLOrderID).Msg("Failed to cancel SL bracket after TP hit")
+						log.Warn().Err(err).Int64("order_id", t.SLOrderID).Msg("Failed to cancel SL after TP hit")
 					}
 				}
 			} else {
 				// SL_HIT: cancel the orphaned TP bracket.
 				if t.TPOrderID != 0 {
 					if err := lt.client.CancelOrder(symbol, t.TPOrderID); err != nil {
-						log.Warn().Err(err).Int64("order_id", t.TPOrderID).Msg("Failed to cancel TP bracket after SL hit")
+						log.Warn().Err(err).Int64("order_id", t.TPOrderID).Msg("Failed to cancel TP after SL hit")
 					}
 				}
 			}
@@ -306,9 +332,21 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 	}
 }
 
+// slLevel returns the effective stop-loss price for a trade: ATR-derived when
+// available, fixed-percentage otherwise.
+func (lt *LiveTrader) slLevel(t *Trade, one decimal.Decimal) decimal.Decimal {
+	if !t.DynamicSLPrice.IsZero() {
+		return t.DynamicSLPrice
+	}
+	if t.Direction == "BUY" {
+		return t.EntryPrice.Mul(one.Sub(lt.SL))
+	}
+	return t.EntryPrice.Mul(one.Add(lt.SL))
+}
+
 // cancelTradeBrackets cancels both the TP and SL orders for a single trade.
-// Errors are logged as warnings because the orders may have already been filled
-// or cancelled on the exchange side.
+// Errors are warnings because the bracket may have already been filled or
+// cancelled on the exchange before our cancel arrives.
 func (lt *LiveTrader) cancelTradeBrackets(symbol string, t *Trade) {
 	if t.TPOrderID != 0 {
 		if err := lt.client.CancelOrder(symbol, t.TPOrderID); err != nil {
@@ -322,9 +360,9 @@ func (lt *LiveTrader) cancelTradeBrackets(symbol string, t *Trade) {
 	}
 }
 
-// emergencyClose places a market order to close an unprotected position. It is
-// called when bracket placement fails during OnSignal. If the close itself
-// fails, an alert is fired because the position now requires manual handling.
+// emergencyClose places a market order to unwind an unprotected entry. If the
+// close itself fails, a critical alert is fired because the position requires
+// manual handling.
 func (lt *LiveTrader) emergencyClose(symbol string, side exchange.OrderSide, qty decimal.Decimal, reason string) {
 	if _, err := lt.client.PlaceMarketOrder(symbol, side, qty); err != nil {
 		log.Error().Err(err).Str("symbol", symbol).Str("reason", reason).
@@ -382,8 +420,7 @@ func (lt *LiveTrader) closeLocal(t *Trade, currentPrice decimal.Decimal, isWin b
 	lossLimit := lt.InitialBalance.Mul(lt.DailyLossLimit).Neg()
 	if lt.DailyPnL.LessThanOrEqual(lossLimit) {
 		lt.TradingEnabled = false
-		log.Error().
-			Str("daily_pnl", lt.DailyPnL.StringFixed(2)).
+		log.Error().Str("daily_pnl", lt.DailyPnL.StringFixed(2)).
 			Msg("Circuit breaker: daily loss limit hit, live trading suspended")
 		if lt.Notifier != nil {
 			lt.Notifier.Notify(fmt.Sprintf("🛑 *CIRCUIT BREAKER*\nDaily PnL: `%s`\nLive trading *SUSPENDED*",
@@ -417,37 +454,24 @@ func (lt *LiveTrader) GetStats() TraderStats {
 	for _, trades := range lt.ActiveTrades {
 		active += len(trades)
 	}
-	return TraderStats{
-		TotalSignals: total,
-		WinRate:      wr,
-		ActiveTrades: active,
-		TotalWins:    lt.TotalWins,
-		TotalLosses:  lt.TotalLosses,
-	}
+	return TraderStats{TotalSignals: total, WinRate: wr, ActiveTrades: active, TotalWins: lt.TotalWins, TotalLosses: lt.TotalLosses}
 }
 
 func (lt *LiveTrader) GetState() TraderState {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
 	return TraderState{
-		Balance:        lt.Balance,
-		InitialBalance: lt.InitialBalance,
-		DailyPnL:       lt.DailyPnL,
-		TotalWins:      lt.TotalWins,
-		TotalLosses:    lt.TotalLosses,
-		TradingEnabled: lt.TradingEnabled,
-		ActiveTrades:   deepCopyActiveTrades(lt.ActiveTrades),
-		Completed:      append([]Trade(nil), lt.Completed...),
+		Balance: lt.Balance, InitialBalance: lt.InitialBalance, DailyPnL: lt.DailyPnL,
+		TotalWins: lt.TotalWins, TotalLosses: lt.TotalLosses, TradingEnabled: lt.TradingEnabled,
+		ActiveTrades: deepCopyActiveTrades(lt.ActiveTrades),
+		Completed:    append([]Trade(nil), lt.Completed...),
 	}
 }
 
 func (lt *LiveTrader) GetTrades() TradesSnapshot {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
-	return TradesSnapshot{
-		Active:    deepCopyActiveTrades(lt.ActiveTrades),
-		Completed: append([]Trade(nil), lt.Completed...),
-	}
+	return TradesSnapshot{Active: deepCopyActiveTrades(lt.ActiveTrades), Completed: append([]Trade(nil), lt.Completed...)}
 }
 
 func (lt *LiveTrader) SetTradingEnabled(enabled bool) {

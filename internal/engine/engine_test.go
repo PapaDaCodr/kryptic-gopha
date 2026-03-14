@@ -53,13 +53,17 @@ func TestStrategy_RSIAccuracy(t *testing.T) {
 	for i, v := range priceVals {
 		prices[i], _ = decimal.NewFromString(v)
 	}
+	candles := make([]models.Candle, len(priceVals))
+	for i, p := range prices {
+		candles[i] = models.Candle{Close: p, High: p, Low: p, Open: p}
+	}
 
 	// 1. Full calculation baseline using local reference implementation.
 	targetRSI := referenceRSI(prices, 3)
 
 	// 2. Drive the incremental implementation to the same end-state.
-	for i := 1; i <= len(prices); i++ {
-		s.Analyze(symbol, prices[:i])
+	for i := 1; i <= len(candles); i++ {
+		s.Analyze(symbol, candles[:i])
 	}
 
 	// Reconstruct RSI from incremental state and compare.
@@ -155,17 +159,21 @@ func TestStrategy_IncrementalAccuracy(t *testing.T) {
 	for i, v := range priceVals {
 		prices[i], _ = decimal.NewFromString(v)
 	}
+	candles := make([]models.Candle, len(priceVals))
+	for i, p := range prices {
+		candles[i] = models.Candle{Close: p, High: p, Low: p, Open: p}
+	}
 
 	// 1. Full calculation for baseline
 	targetEMA := calculateEMA(prices, 4)
-	
+
 	// 2. Incremental calculation
-	for i := 1; i <= len(prices); i++ {
-		s.Analyze(symbol, prices[:i])
+	for i := 1; i <= len(candles); i++ {
+		s.Analyze(symbol, candles[:i])
 	}
 
 	gotEMA := s.lastEMA[symbol][4]
-	
+
 	if !gotEMA.Equal(targetEMA) {
 		t.Errorf("Incremental EMA mismatch. Target: %s, Got: %s", targetEMA.String(), gotEMA.String())
 	}
