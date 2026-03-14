@@ -38,30 +38,39 @@ Binance WS Stream
                     Aggregation UpdateMetrics  Analyze
                           │                     │
                           │                   Signal
-                          │                     │
+                          │                 (with ATR)
                           └─────────────────────►
                                                  │
                                             Trader.OnSignal
                                                  │
-                                        Exchange Orders (live)
-                                        Simulated P&L (paper)
+                                      ATR-sized position
+                                      Exchange Orders (live)
+                                      Simulated P&L (paper)
 ```
 
 ---
 
 ## Strategy
 
-The production strategy (`EfficientMultiFactorStrategy`) uses three sequential filters:
+The production strategy (`EfficientMultiFactorStrategy`) applies five sequential filters. All conditions must pass for an entry to be warranted.
 
-1. **Macro trend filter** — price must be above the 200-period EMA for longs and below for shorts. This is the single highest-value filter: it suppresses the majority of losing counter-trend trades.
+**Long entry conditions (short mirrors each with reversed comparisons):**
 
-2. **Entry trigger** — the 12-period EMA must cross the 26-period EMA in the direction of the macro trend. This is equivalent to a MACD signal crossover.
+| # | Filter | Condition | Purpose |
+|---|---|---|---|
+| 1 | Macro trend | `close > EMA(200)` | Align with dominant directional bias |
+| 2 | ADX regime gate | `ADX(14) > 25` | Confirm a trending market; suppress EMA noise in ranging conditions |
+| 3 | Entry trigger | `EMA(12) > EMA(26)` | MACD-equivalent crossover in trend direction |
+| 4 | Momentum gate | `RSI(14) < 70` | Avoid entering near exhaustion |
+| 5 | Volume confirmation | `bar_volume > 1.2 × EMA20(volume)` | Require institutional participation behind the move |
 
-3. **Momentum gate** — RSI(14) must be below 70 for longs and above 30 for shorts, preventing entries near exhaustion points.
+The 200-period EMA macro filter and the ADX gate together address the two primary failure modes of EMA crossover systems: counter-trend entries and false crossovers during ranging markets.
 
-All indicators are computed incrementally using Wilder's smoothing, so each bar update is O(1) regardless of lookback period size. State is seeded on first contact with each symbol by fetching 100 historical 1-minute klines from the Binance REST API.
+**Signal output** includes `ATR(14)` in price units, which the trader uses to size positions dynamically (see Risk Management below).
 
-**Known limitations** — see [research/hft_analysis.md](research/hft_analysis.md) for a detailed quantitative assessment and improvement roadmap.
+**Indicator computation** — all five indicators are maintained incrementally using Wilder's exponential smoothing, reducing each bar update to O(1). State is seeded on first contact with each symbol by processing 100 historical 1-minute klines fetched from the Binance REST API.
+
+See [research/hft_analysis.md](research/hft_analysis.md) for a detailed quantitative assessment of the strategy's performance characteristics and remaining improvement roadmap.
 
 ---
 
@@ -70,15 +79,18 @@ All indicators are computed incrementally using Wilder's smoothing, so each bar 
 | Parameter | Paper Default | Live Default | Environment Variable |
 |---|---|---|---|
 | Take-profit | 5% | 0.5% | `TP` |
-| Stop-loss | 2% | 0.3% | `SL` |
+| Stop-loss (fixed fallback) | 2% | 0.3% | `SL` |
+| Dynamic stop-loss | 1.5 × ATR(14) | 1.5 × ATR(14) | — (automatic when ATR available) |
 | Trailing SL distance | 1.5% | 0.3% | `TRAILING_SL_PCT` |
 | Risk per trade | 2% of balance | 1% of balance | `RISK_PER_TRADE` |
 | Daily loss limit | 6% | 5% | `DAILY_LOSS_LIMIT` |
 | Max open trades | 5 | 3 | `MAX_OPEN_TRADES` |
 
-Position size is calculated as `(balance × risk%) / (entry_price × sl%)`, bounding the dollar loss on any single trade to the configured risk percentage.
+**Position sizing** — when `Signal.ATR > 0`, position size is computed as `(balance × risk%) / (1.5 × ATR)`, bounding the dollar loss on any single trade to the configured risk percentage regardless of current volatility. When ATR is unavailable (insufficient history), the system falls back to `(balance × risk%) / (entry_price × SL%)`.
 
-A **circuit breaker** suspends all new entries when daily PnL falls below `DAILY_LOSS_LIMIT`. It resets automatically at calendar day rollover or on the `/resume` Telegram command.
+**Dynamic stop-loss** — the ATR-based stop (`entry ± 1.5 × ATR`) is stored per-trade and used throughout the life of the position. This produces tighter stops in low-volatility conditions (faster capital recovery) and wider stops in volatile conditions (fewer premature exits on valid trends).
+
+**Circuit breaker** — suspends all new entries when daily PnL falls below `DAILY_LOSS_LIMIT`. Resets automatically at calendar day rollover or on the `/resume` Telegram command.
 
 ---
 
@@ -94,7 +106,7 @@ TRADING_MODE=paper          # paper | live
 SHORT_PERIOD=12
 LONG_PERIOD=26
 RSI_PERIOD=14
-BAR_INTERVAL_SECONDS=60     # Candle aggregation interval
+BAR_INTERVAL_SECONDS=60     # Candle aggregation interval in seconds
 
 # Watchlist (comma-separated Binance USDT-M futures symbols)
 WATCHLIST=BTCUSDT,ETHUSDT,BNBUSDT

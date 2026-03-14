@@ -14,9 +14,8 @@ import (
 // for different symbols run in parallel.
 type symbolState struct {
 	sync.Mutex
-	buffer        *PriceBuffer
-	history       []models.Candle
-	currentCandle *models.Candle
+	history        []models.Candle
+	currentCandle  *models.Candle
 	lastSignalType string
 	lastSignalTime time.Time
 	signalHistory  []models.Signal
@@ -31,6 +30,7 @@ type EngineManager struct {
 	Signals     chan models.Signal
 	Trader      Trader
 	BarInterval time.Duration
+	bufferSize  int
 }
 
 func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trader Trader) *EngineManager {
@@ -40,10 +40,10 @@ func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trade
 		Signals:     make(chan models.Signal, 1000),
 		Trader:      trader,
 		BarInterval: time.Minute,
+		bufferSize:  bufferSize,
 	}
 	for _, s := range symbols {
 		mgr.states[s] = &symbolState{
-			buffer:  NewPriceBuffer(bufferSize),
 			history: make([]models.Candle, 0, bufferSize),
 		}
 	}
@@ -79,9 +79,8 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 
 	if curr == nil || tickTime.After(curr.Time) {
 		if curr != nil {
-			state.buffer.Add(curr.Close)
 			state.history = append(state.history, *curr)
-			if len(state.history) > state.buffer.size {
+			if len(state.history) > m.bufferSize {
 				state.history = state.history[1:]
 			}
 			m.analyzeInternal(tick.Symbol, state)
@@ -115,8 +114,7 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 //
 // Must be called with state.Lock held.
 func (m *EngineManager) analyzeInternal(symbol string, state *symbolState) {
-	history := state.buffer.GetHistory()
-	signal := m.Strategy.Analyze(symbol, history)
+	signal := m.Strategy.Analyze(symbol, state.history)
 	if signal == nil {
 		return
 	}

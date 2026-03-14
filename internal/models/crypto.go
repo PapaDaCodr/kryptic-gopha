@@ -20,11 +20,13 @@ type PricePoint struct {
 	Timestamp time.Time       `json:"timestamp"`
 }
 
-// Signal is the output of a Strategy.Analyze call. Confidence is in [0, 1]
-// where higher values indicate stronger alignment across indicator conditions.
-// TP and SL prices are not included here: both traders compute their own
-// bracket levels from trader-level percentage settings, ensuring consistent
-// risk management regardless of which strategy generated the signal.
+// Signal is the output of a Strategy.Analyze call. Confidence is in [0, 1].
+//
+// ATR holds the 14-period Average True Range at signal time, expressed in
+// price units. Traders use it to compute ATR-based stop-loss distances
+// (typically 1.5x ATR). Zero means the strategy has not accumulated enough
+// history to produce a valid ATR and the trader should fall back to its
+// configured fixed-percentage SL.
 type Signal struct {
 	Symbol     string          `json:"symbol"`
 	Price      decimal.Decimal `json:"price"`
@@ -32,6 +34,7 @@ type Signal struct {
 	Reason     string          `json:"reason"`
 	Confidence float64         `json:"confidence"`
 	Timestamp  time.Time       `json:"timestamp"`
+	ATR        decimal.Decimal `json:"atr,omitempty"`
 }
 
 // Candle is a completed OHLCV bar.
