@@ -13,6 +13,11 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// Trade is a single position record, shared between PaperTrader and LiveTrader.
+// TPOrderID / SLOrderID are populated only by LiveTrader and hold the Binance
+// order IDs of the bracket orders placed at entry. They are used to cancel
+// the correct bracket when the position closes, without disturbing other open
+// orders on the same symbol.
 type Trade struct {
 	Symbol        string                  `json:"symbol"`
 	EntryPrice    decimal.Decimal         `json:"entry_price"`
@@ -23,34 +28,40 @@ type Trade struct {
 	Status        string                  `json:"status"`
 	ExitPrice     decimal.Decimal         `json:"exit_price"`
 	PnL           decimal.Decimal         `json:"pnl"`
-	HighWaterMark decimal.Decimal         `json:"high_water_mark"` // Best price seen for trailing SL
+	HighWaterMark decimal.Decimal         `json:"high_water_mark"`
 	ExitReason    string                  `json:"exit_reason"`
+	TPOrderID     int64                   `json:"tp_order_id,omitempty"`
+	SLOrderID     int64                   `json:"sl_order_id,omitempty"`
 }
 
+// PaperTrader simulates trade execution against live market data without
+// placing real orders. It is the default trading mode and the backend for
+// the backtester.
+//
+// The embedded sync.Mutex is intentionally unexported-by-convention: callers
+// outside this package should only interact through the Trader interface methods,
+// each of which acquires the lock internally.
 type PaperTrader struct {
 	sync.Mutex
 	ActiveTrades map[string][]*Trade `json:"active_trades"`
 	Completed    []Trade             `json:"completed"`
 	TotalWins    int                 `json:"total_wins"`
 	TotalLosses  int                 `json:"total_losses"`
-	
-	// Risk Management Settings
-	TP               decimal.Decimal     `json:"tp"`
-	SL               decimal.Decimal     `json:"sl"`
-	TrailingSL       bool                `json:"trailing_sl"`         // Enable trailing stop-loss
-	TrailingSLPct    decimal.Decimal     `json:"trailing_sl_pct"`     // Trailing distance (e.g., 0.003 = 0.3%)
-	Balance          decimal.Decimal     `json:"balance"`
-	InitialBalance   decimal.Decimal     `json:"initial_balance"`
-	RiskPerTrade     decimal.Decimal     `json:"risk_per_trade"`
-	MaxOpenTrades    int                 `json:"max_open_trades"`
-	DailyLossLimit   decimal.Decimal     `json:"daily_loss_limit"`
-	
-	// Circuit Breaker State
-	TradingEnabled bool              `json:"trading_enabled"`
-	LastDailyReset time.Time         `json:"last_daily_reset"`
-	DailyPnL       decimal.Decimal   `json:"daily_pnl"`
 
-	// External services
+	TP             decimal.Decimal `json:"tp"`
+	SL             decimal.Decimal `json:"sl"`
+	TrailingSL     bool            `json:"trailing_sl"`
+	TrailingSLPct  decimal.Decimal `json:"trailing_sl_pct"`
+	Balance        decimal.Decimal `json:"balance"`
+	InitialBalance decimal.Decimal `json:"initial_balance"`
+	RiskPerTrade   decimal.Decimal `json:"risk_per_trade"`
+	MaxOpenTrades  int             `json:"max_open_trades"`
+	DailyLossLimit decimal.Decimal `json:"daily_loss_limit"`
+
+	TradingEnabled bool            `json:"trading_enabled"`
+	LastDailyReset time.Time       `json:"last_daily_reset"`
+	DailyPnL       decimal.Decimal `json:"daily_pnl"`
+
 	Notifier notifier.Notifier `json:"-"`
 }
 
@@ -62,7 +73,7 @@ func NewPaperTrader(balance float64) *PaperTrader {
 		TP:             decimal.NewFromFloat(0.005),
 		SL:             decimal.NewFromFloat(0.003),
 		TrailingSL:     true,
-		TrailingSLPct:  decimal.NewFromFloat(0.003), // 0.3% trailing distance
+		TrailingSLPct:  decimal.NewFromFloat(0.003),
 		Balance:        bal,
 		InitialBalance: bal,
 		RiskPerTrade:   decimal.NewFromFloat(0.01),
@@ -79,25 +90,22 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 	defer p.Unlock()
 
 	if !p.TradingEnabled {
-		log.Warn().Str("symbol", sig.Symbol).Msg("Trade ignored: Circuit breaker active")
+		log.Warn().Str("symbol", sig.Symbol).Msg("Trade ignored: circuit breaker active")
 		return
 	}
-
 	p.checkDailyReset()
 
-	// Check Max Concurrent Trades
 	activeCount := 0
 	for _, trades := range p.ActiveTrades {
 		activeCount += len(trades)
 	}
 	if activeCount >= p.MaxOpenTrades {
-		log.Warn().Int("limit", p.MaxOpenTrades).Msg("Trade ignored: Max open trades reached")
+		log.Warn().Int("limit", p.MaxOpenTrades).Msg("Trade ignored: max open trades reached")
 		return
 	}
 
-	// Dynamic Position Sizing
-	// Size = (Balance * RiskPerTrade) / SL_Amount
-	// If SL is 0.3%, we risk 1% of balance.
+	// Position size = (balance * risk%) / (entry_price * sl%)
+	// Losses are bounded to RiskPerTrade regardless of how far SL is set.
 	riskAmount := p.Balance.Mul(p.RiskPerTrade)
 	quantity := riskAmount.Div(sig.Price.Mul(p.SL))
 
@@ -109,16 +117,16 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		Time:          sig.Timestamp,
 		Exits:         make(map[int]decimal.Decimal),
 		Status:        "ACTIVE",
-		HighWaterMark: sig.Price, // Initialize HWM at entry
+		HighWaterMark: sig.Price,
 	}
 	p.ActiveTrades[sig.Symbol] = append(p.ActiveTrades[sig.Symbol], trade)
-	
+
 	log.Info().
 		Str("symbol", sig.Symbol).
 		Str("direction", sig.Direction).
 		Str("price", sig.Price.String()).
 		Str("quantity", quantity.StringFixed(4)).
-		Msg("New trade opened")
+		Msg("Paper trade opened")
 
 	if p.Notifier != nil {
 		p.Notifier.Notify(fmt.Sprintf("🚀 *NEW TRADE*\nSymbol: `%s`\nDirection: %s\nPrice: %s\nQty: %s",
@@ -139,7 +147,6 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 	one := decimal.NewFromInt(1)
 
 	for _, t := range trades {
-		// Update High Water Mark for trailing SL
 		if t.Direction == "BUY" && currentPrice.GreaterThan(t.HighWaterMark) {
 			t.HighWaterMark = currentPrice
 		} else if t.Direction == "SELL" && currentPrice.LessThan(t.HighWaterMark) {
@@ -150,56 +157,43 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 		isLoss := false
 		exitReason := ""
 
-		// Check fixed TP
 		if t.Direction == "BUY" {
 			if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(p.TP))) {
-				isWin = true
-				exitReason = "TP_HIT"
+				isWin, exitReason = true, "TP_HIT"
 			}
 		} else {
 			if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(one.Sub(p.TP))) {
-				isWin = true
-				exitReason = "TP_HIT"
+				isWin, exitReason = true, "TP_HIT"
 			}
 		}
 
-		// Check Trailing SL (if enabled) or fixed SL
 		if !isWin {
 			if p.TrailingSL {
-				// Trailing SL: stop is relative to HWM, not entry
+				// Stop level trails the high-water mark, not the entry price.
+				// A TRAILING_SL exit above entry is counted as a win.
 				if t.Direction == "BUY" {
 					trailStop := t.HighWaterMark.Mul(one.Sub(p.TrailingSLPct))
 					if currentPrice.LessThanOrEqual(trailStop) {
-						// It's a win if we're still above entry
-						if currentPrice.GreaterThan(t.EntryPrice) {
-							isWin = true
-						} else {
-							isLoss = true
-						}
+						isWin = currentPrice.GreaterThan(t.EntryPrice)
+						isLoss = !isWin
 						exitReason = "TRAILING_SL"
 					}
 				} else {
 					trailStop := t.HighWaterMark.Mul(one.Add(p.TrailingSLPct))
 					if currentPrice.GreaterThanOrEqual(trailStop) {
-						if currentPrice.LessThan(t.EntryPrice) {
-							isWin = true
-						} else {
-							isLoss = true
-						}
+						isWin = currentPrice.LessThan(t.EntryPrice)
+						isLoss = !isWin
 						exitReason = "TRAILING_SL"
 					}
 				}
 			} else {
-				// Fixed SL
 				if t.Direction == "BUY" {
 					if currentPrice.LessThanOrEqual(t.EntryPrice.Mul(one.Sub(p.SL))) {
-						isLoss = true
-						exitReason = "FIXED_SL"
+						isLoss, exitReason = true, "FIXED_SL"
 					}
 				} else {
 					if currentPrice.GreaterThanOrEqual(t.EntryPrice.Mul(one.Add(p.SL))) {
-						isLoss = true
-						exitReason = "FIXED_SL"
+						isLoss, exitReason = true, "FIXED_SL"
 					}
 				}
 			}
@@ -211,22 +205,18 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 			continue
 		}
 
-		// Time-based exit checks
+		// Snapshot the price at fixed intervals for performance attribution.
+		// The 10-minute snapshot doubles as the time-based exit trigger.
 		duration := now.Sub(t.Time).Minutes()
-		checkIntervals := []int{1, 5, 10}
-		for _, interval := range checkIntervals {
-			if duration >= float64(interval) && (t.Exits[interval].IsZero()) {
+		for _, interval := range []int{1, 5, 10} {
+			if duration >= float64(interval) && t.Exits[interval].IsZero() {
 				t.Exits[interval] = currentPrice
 			}
 		}
 
 		if !t.Exits[10].IsZero() {
-			isWinAt10 := false
-			if t.Direction == "BUY" && currentPrice.GreaterThan(t.EntryPrice) {
-				isWinAt10 = true
-			} else if t.Direction == "SELL" && currentPrice.LessThan(t.EntryPrice) {
-				isWinAt10 = true
-			}
+			isWinAt10 := (t.Direction == "BUY" && currentPrice.GreaterThan(t.EntryPrice)) ||
+				(t.Direction == "SELL" && currentPrice.LessThan(t.EntryPrice))
 			t.ExitReason = "TIME_EXIT"
 			p.closeTrade(t, currentPrice, isWinAt10)
 			continue
@@ -242,24 +232,24 @@ func (p *PaperTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 	}
 }
 
+// closeTrade finalises a position, updates accounting, and fires the circuit
+// breaker if the daily loss limit is breached. Must be called with p.Lock held.
 func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin bool) {
-	t.Status = "LOSS"
 	if isWin {
 		t.Status = "WIN"
 		p.TotalWins++
 	} else {
+		t.Status = "LOSS"
 		p.TotalLosses++
 	}
 	t.ExitPrice = currentPrice
 
-	// Calculate PnL: (Exit - Entry) * Qty for BUY, (Entry - Exit) * Qty for SELL
 	var pnl decimal.Decimal
 	if t.Direction == "BUY" {
 		pnl = t.ExitPrice.Sub(t.EntryPrice).Mul(t.Quantity)
 	} else {
 		pnl = t.EntryPrice.Sub(t.ExitPrice).Mul(t.Quantity)
 	}
-	
 	t.PnL = pnl
 	p.Balance = p.Balance.Add(pnl)
 	p.DailyPnL = p.DailyPnL.Add(pnl)
@@ -273,32 +263,32 @@ func (p *PaperTrader) closeTrade(t *Trade, currentPrice decimal.Decimal, isWin b
 		Str("pnl", pnl.StringFixed(2)).
 		Str("reason", t.ExitReason).
 		Str("result", t.Status).
-		Msg("Trade closed")
+		Msg("Paper trade closed")
 
 	if p.Notifier != nil {
 		emoji := "❌"
 		if t.Status == "WIN" {
 			emoji = "✅"
 		}
-		p.Notifier.Notify(fmt.Sprintf("%s *TRADE CLOSED*\nSymbol: `%s`\nDirection: %s\nEntry: %s → Exit: %s\nHigh: %s\nPnL: `%s`\nReason: %s\nResult: *%s*",
-			emoji, t.Symbol, t.Direction, t.EntryPrice.String(), currentPrice.String(), t.HighWaterMark.String(), pnl.StringFixed(2), t.ExitReason, t.Status))
+		p.Notifier.Notify(fmt.Sprintf(
+			"%s *TRADE CLOSED*\nSymbol: `%s`\nDirection: %s\nEntry: %s → Exit: %s\nHigh: %s\nPnL: `%s`\nReason: %s\nResult: *%s*",
+			emoji, t.Symbol, t.Direction, t.EntryPrice.String(), currentPrice.String(),
+			t.HighWaterMark.String(), pnl.StringFixed(2), t.ExitReason, t.Status))
 	}
 
-	// Check Circuit Breaker
 	lossLimit := p.InitialBalance.Mul(p.DailyLossLimit).Neg()
 	if p.DailyPnL.LessThanOrEqual(lossLimit) {
 		p.TradingEnabled = false
 		log.Error().
 			Str("daily_pnl", p.DailyPnL.StringFixed(2)).
 			Str("limit", lossLimit.StringFixed(2)).
-			Msg("CIRCUIT BREAKER TRIGGERED: Daily loss limit hit. Trading suspended.")
-
+			Msg("Circuit breaker triggered: daily loss limit exceeded, trading suspended")
 		if p.Notifier != nil {
-			p.Notifier.Notify(fmt.Sprintf("🛑 *CIRCUIT BREAKER TRIGGERED*\nDaily PnL: `%s`\nLimit: `%s`\nTrading has been *SUSPENDED*",
+			p.Notifier.Notify(fmt.Sprintf("🛑 *CIRCUIT BREAKER*\nDaily PnL: `%s`\nLimit: `%s`\nTrading *SUSPENDED*",
 				p.DailyPnL.StringFixed(2), lossLimit.StringFixed(2)))
 		}
 	}
-	
+
 	p.Completed = append(p.Completed, *t)
 }
 
@@ -307,10 +297,10 @@ func (p *PaperTrader) checkDailyReset() {
 	if now.YearDay() != p.LastDailyReset.YearDay() || now.Year() != p.LastDailyReset.Year() {
 		log.Info().
 			Str("prev_daily_pnl", p.DailyPnL.StringFixed(2)).
-			Msg("Daily risk reset. Trading re-enabled if it was suspended.")
+			Msg("Daily risk reset")
 		p.DailyPnL = decimal.Zero
 		p.TradingEnabled = true
-		p.InitialBalance = p.Balance // Set new baseline for today
+		p.InitialBalance = p.Balance
 		p.LastDailyReset = now
 	}
 }
@@ -318,7 +308,6 @@ func (p *PaperTrader) checkDailyReset() {
 func (p *PaperTrader) GetWinRate() float64 {
 	p.Lock()
 	defer p.Unlock()
-
 	total := p.TotalWins + p.TotalLosses
 	if total == 0 {
 		return 0
@@ -326,53 +315,33 @@ func (p *PaperTrader) GetWinRate() float64 {
 	return float64(p.TotalWins) / float64(total) * 100
 }
 
-// TraderStats is a point-in-time snapshot of trader health metrics.
-type TraderStats struct {
-	TotalSignals int
-	WinRate      float64
-	ActiveTrades int
-}
-
-// GetStats returns a consistent snapshot of health metrics under a single lock.
-// Use this instead of reading individual fields from multiple callsites to avoid
-// data races.
 func (p *PaperTrader) GetStats() TraderStats {
 	p.Lock()
 	defer p.Unlock()
-
 	total := p.TotalWins + p.TotalLosses
 	winRate := 0.0
 	if total > 0 {
 		winRate = float64(p.TotalWins) / float64(total) * 100
 	}
-
-	activeTrades := 0
+	active := 0
 	for _, trades := range p.ActiveTrades {
-		activeTrades += len(trades)
+		active += len(trades)
 	}
-
 	return TraderStats{
 		TotalSignals: total,
 		WinRate:      winRate,
-		ActiveTrades: activeTrades,
+		ActiveTrades: active,
+		TotalWins:    p.TotalWins,
+		TotalLosses:  p.TotalLosses,
 	}
 }
 
-// GetState returns a locked snapshot of the full trader state for the /api/state endpoint.
+// GetState returns a deep-copied snapshot safe for JSON encoding without
+// holding the lock. Struct values are copied, not pointers, to prevent races
+// between the encoder and a concurrent UpdateMetrics call.
 func (p *PaperTrader) GetState() TraderState {
 	p.Lock()
 	defer p.Unlock()
-
-	// Deep copy active trades so the caller holds a stable snapshot.
-	activeCopy := make(map[string][]*Trade, len(p.ActiveTrades))
-	for sym, trades := range p.ActiveTrades {
-		cp := make([]*Trade, len(trades))
-		copy(cp, trades)
-		activeCopy[sym] = cp
-	}
-	completedCopy := make([]Trade, len(p.Completed))
-	copy(completedCopy, p.Completed)
-
 	return TraderState{
 		Balance:        p.Balance,
 		InitialBalance: p.InitialBalance,
@@ -380,36 +349,26 @@ func (p *PaperTrader) GetState() TraderState {
 		TotalWins:      p.TotalWins,
 		TotalLosses:    p.TotalLosses,
 		TradingEnabled: p.TradingEnabled,
-		ActiveTrades:   activeCopy,
-		Completed:      completedCopy,
+		ActiveTrades:   deepCopyActiveTrades(p.ActiveTrades),
+		Completed:      append([]Trade(nil), p.Completed...),
 	}
 }
 
-// GetTrades returns a locked snapshot of active and completed trades for /api/trades.
 func (p *PaperTrader) GetTrades() TradesSnapshot {
 	p.Lock()
 	defer p.Unlock()
-
-	activeCopy := make(map[string][]*Trade, len(p.ActiveTrades))
-	for sym, trades := range p.ActiveTrades {
-		cp := make([]*Trade, len(trades))
-		copy(cp, trades)
-		activeCopy[sym] = cp
+	return TradesSnapshot{
+		Active:    deepCopyActiveTrades(p.ActiveTrades),
+		Completed: append([]Trade(nil), p.Completed...),
 	}
-	completedCopy := make([]Trade, len(p.Completed))
-	copy(completedCopy, p.Completed)
-
-	return TradesSnapshot{Active: activeCopy, Completed: completedCopy}
 }
 
-// SetTradingEnabled suspends or resumes trading (used by Telegram /stop command).
 func (p *PaperTrader) SetTradingEnabled(enabled bool) {
 	p.Lock()
 	defer p.Unlock()
 	p.TradingEnabled = enabled
 }
 
-// SetBalance replaces balance and resets the initial balance baseline.
 func (p *PaperTrader) SetBalance(bal decimal.Decimal) {
 	p.Lock()
 	defer p.Unlock()
@@ -419,9 +378,8 @@ func (p *PaperTrader) SetBalance(bal decimal.Decimal) {
 
 func (p *PaperTrader) SaveState(filename string) error {
 	p.Lock()
-	defer p.Unlock()
-
 	data, err := json.MarshalIndent(p, "", "  ")
+	p.Unlock()
 	if err != nil {
 		return err
 	}
@@ -429,12 +387,27 @@ func (p *PaperTrader) SaveState(filename string) error {
 }
 
 func (p *PaperTrader) LoadState(filename string) error {
-	p.Lock()
-	defer p.Unlock()
-
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return err
 	}
+	p.Lock()
+	defer p.Unlock()
 	return json.Unmarshal(data, p)
+}
+
+// deepCopyActiveTrades returns a map of independent Trade copies. Each Trade
+// value is copied by struct value to ensure the snapshot cannot race with
+// in-flight UpdateMetrics mutations.
+func deepCopyActiveTrades(src map[string][]*Trade) map[string][]*Trade {
+	dst := make(map[string][]*Trade, len(src))
+	for sym, trades := range src {
+		cp := make([]*Trade, len(trades))
+		for i, t := range trades {
+			tcopy := *t
+			cp[i] = &tcopy
+		}
+		dst[sym] = cp
+	}
+	return dst
 }

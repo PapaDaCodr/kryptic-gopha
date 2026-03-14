@@ -1,0 +1,22 @@
+# Secrets
+.env
+*.key
+*.pem
+
+# Runtime artifacts generated at process start
+trader_state.json
+*.log
+
+# Compiled binaries
+bot
+main
+kryptic-gopha
+bin/
+
+# VCS and CI tooling
+.git/
+.codacy/
+.github/
+
+# Development noise
+*.tmp

@@ -25,10 +25,8 @@ import (
 const stateFile = "trader_state.json"
 
 func init() {
-	// Load .env file (ignore error if not found, e.g. in Docker)
+	// .env is optional; Docker deployments inject vars directly.
 	_ = godotenv.Load()
-
-	// Configure zerolog for production (JSON) or development (Console)
 	if os.Getenv("ENV") == "dev" {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
 	}
@@ -36,11 +34,11 @@ func init() {
 }
 
 func main() {
-	// 1. Setup Context & Shutdown Handling
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 2. Configuration from Environment Variables
+	// ── Configuration ─────────────────────────────────────────────────────────
+
 	watchStr := os.Getenv("WATCHLIST")
 	if watchStr == "" {
 		watchStr = "BTCUSDT,ETHUSDT,BNBUSDT"
@@ -51,7 +49,8 @@ func main() {
 	longPeriod := getEnvInt("LONG_PERIOD", 26)
 	rsiPeriod := getEnvInt("RSI_PERIOD", 14)
 
-	// Validate strategy parameters at startup so misconfiguration is caught early.
+	// Fail fast on invalid strategy parameters so misconfiguration is caught
+	// before any network connections are established.
 	if shortPeriod <= 0 {
 		log.Fatal().Int("SHORT_PERIOD", shortPeriod).Msg("SHORT_PERIOD must be > 0")
 	}
@@ -68,9 +67,10 @@ func main() {
 
 	strategy := engine.NewEfficientStrategy(shortPeriod, longPeriod, rsiPeriod)
 
-	// 2b. Select paper or live trading mode.
+	// ── Trader Selection ──────────────────────────────────────────────────────
+
 	var trader engine.Trader
-	tradingMode := os.Getenv("TRADING_MODE") // "paper" (default) or "live"
+	tradingMode := os.Getenv("TRADING_MODE")
 
 	if tradingMode == "live" {
 		apiKey := os.Getenv("BINANCE_API_KEY")
@@ -104,12 +104,12 @@ func main() {
 		log.Info().Msg("Trading mode: PAPER (simulation)")
 	}
 
-	// 2c. Telegram Notifications
+	// ── Telegram ──────────────────────────────────────────────────────────────
+
 	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	tgChatID := os.Getenv("TELEGRAM_CHAT_ID")
 	if tgToken != "" && tgChatID != "" {
 		tgNotifier := notifier.NewTelegramNotifier(tgToken, tgChatID)
-		// Wire notifier to the concrete trader type.
 		switch t := trader.(type) {
 		case *engine.PaperTrader:
 			t.Notifier = tgNotifier
@@ -117,8 +117,7 @@ func main() {
 			t.Notifier = tgNotifier
 		}
 		log.Info().Msg("Telegram notifications enabled")
-		
-		// Start listening for commands; ctx cancellation stops the goroutine.
+
 		tgNotifier.StartListening(ctx, func(command string, args []string) string {
 			switch command {
 			case "/status":
@@ -159,23 +158,25 @@ func main() {
 					return "Invalid amount format."
 				}
 				trader.SetBalance(amount)
-				return fmt.Sprintf("✅ Balance successfully updated to *$%s*.", amount.StringFixed(2))
+				return fmt.Sprintf("✅ Balance updated to *$%s*.", amount.StringFixed(2))
 
 			default:
-				return "Unknown command. Available:\n/status\n/stop\n/resume\n/setbalance <amount>"
+				return "Unknown command. Use /help for available commands."
 			}
 		})
 	} else {
-		log.Warn().Msg("Telegram not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable.")
+		log.Warn().Msg("Telegram not configured (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to enable)")
 	}
 
-	// 3. Load previous state if exists; re-apply env config so .env always wins.
+	// ── State Restore ─────────────────────────────────────────────────────────
+
+	// LoadState overwrites all fields including risk parameters, so re-apply
+	// env config after restore to ensure .env always takes precedence.
 	if _, err := os.Stat(stateFile); err == nil {
 		if err := trader.LoadState(stateFile); err != nil {
 			log.Warn().Err(err).Msg("Failed to load state file")
 		} else {
-			log.Info().Msg("Previous state loaded successfully")
-			// Re-apply risk config after state restore (LoadState overwrites fields).
+			log.Info().Msg("Previous state loaded")
 			switch t := trader.(type) {
 			case *engine.PaperTrader:
 				t.TP = getEnvDecimal("TP", "0.05")
@@ -193,6 +194,8 @@ func main() {
 		}
 	}
 
+	// ── Engine Setup ──────────────────────────────────────────────────────────
+
 	mgr := engine.NewEngineManager(watchlist, 500, strategy, trader)
 	barSeconds := getEnvInt("BAR_INTERVAL_SECONDS", 60)
 	if barSeconds < 1 {
@@ -200,43 +203,46 @@ func main() {
 	}
 	mgr.BarInterval = time.Duration(barSeconds) * time.Second
 	log.Info().Int("bar_interval_seconds", barSeconds).Msg("Bar interval configured")
-	
-	// 4. Warm-up Phase: Load historical data
-	log.Info().Int("count", len(watchlist)).Msg("Starting warm-up phase")
+
+	// Warm-up: seed price history from REST klines so the strategy can produce
+	// valid signals on the first live bar rather than waiting for MacroPeriod bars.
+	log.Info().Int("symbols", len(watchlist)).Msg("Warm-up: fetching historical klines")
 	for _, symbol := range watchlist {
 		ticks, err := ingester.FetchHistoricalKlines(symbol, "1m", 100)
 		if err != nil {
-			log.Error().Err(err).Str("symbol", symbol).Msg("Warm-up fetch failed")
+			log.Error().Err(err).Str("symbol", symbol).Msg("Warm-up fetch failed; starting cold")
 			continue
 		}
 		for _, tick := range ticks {
 			if err := mgr.UpdatePrice(tick); err != nil {
-				log.Error().Err(err).Str("symbol", symbol).Msg("Warm-up processing failed")
+				log.Error().Err(err).Str("symbol", symbol).Msg("Warm-up tick error")
 			}
 		}
-		log.Debug().Str("symbol", symbol).Int("ticks", len(ticks)).Msg("Warmed up symbol")
+		log.Debug().Str("symbol", symbol).Int("ticks", len(ticks)).Msg("Symbol warmed up")
 	}
 
-	// 5. Signal Listener
+	// ── Signal Listener ───────────────────────────────────────────────────────
+
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case signal := <-mgr.Signals:
+			case sig := <-mgr.Signals:
 				log.Info().
-					Str("symbol", signal.Symbol).
-					Str("direction", signal.Direction).
-					Str("price", signal.Price.String()).
-					Float64("confidence", signal.Confidence).
-					Str("reason", signal.Reason).
-					Msg("Trading signal received")
-				trader.OnSignal(signal)
+					Str("symbol", sig.Symbol).
+					Str("direction", sig.Direction).
+					Str("price", sig.Price.String()).
+					Float64("confidence", sig.Confidence).
+					Str("reason", sig.Reason).
+					Msg("Signal received")
+				trader.OnSignal(sig)
 			}
 		}
 	}()
 
-	// 6. Persistence & Report Ticker
+	// ── Persistence Ticker ────────────────────────────────────────────────────
+
 	go func() {
 		ticker := time.NewTicker(2 * time.Minute)
 		defer ticker.Stop()
@@ -246,9 +252,8 @@ func main() {
 				return
 			case <-ticker.C:
 				if err := trader.SaveState(stateFile); err != nil {
-					log.Error().Err(err).Msg("Failed to save state")
+					log.Error().Err(err).Msg("Periodic state save failed")
 				}
-
 				stats := trader.GetStats()
 				log.Info().
 					Int("total_signals", stats.TotalSignals).
@@ -258,60 +263,67 @@ func main() {
 		}
 	}()
 
-	// 7. Health Check Server (JSON API)
+	// ── HTTP API ──────────────────────────────────────────────────────────────
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		stats := trader.GetStats()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		if err := json.NewEncoder(w).Encode(map[string]any{
 			"status":        "OK",
 			"watchlist":     watchlist,
 			"total_signals": stats.TotalSignals,
 			"win_rate":      stats.WinRate,
 			"active_trades": stats.ActiveTrades,
-		})
+		}); err != nil {
+			log.Error().Err(err).Msg("/health encode error")
+		}
 	})
 
-	// Dashboard API Endpoints
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(trader.GetState())
+		if err := json.NewEncoder(w).Encode(trader.GetState()); err != nil {
+			log.Error().Err(err).Msg("/api/state encode error")
+		}
 	})
 
 	mux.HandleFunc("/api/trades", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(trader.GetTrades())
+		if err := json.NewEncoder(w).Encode(trader.GetTrades()); err != nil {
+			log.Error().Err(err).Msg("/api/trades encode error")
+		}
 	})
 
 	mux.HandleFunc("/api/signals", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		symbol := r.URL.Query().Get("symbol")
 		if symbol == "" {
 			http.Error(w, `{"error":"symbol required"}`, http.StatusBadRequest)
 			return
 		}
-		json.NewEncoder(w).Encode(mgr.GetSignals(symbol))
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(mgr.GetSignals(symbol)); err != nil {
+			log.Error().Err(err).Msg("/api/signals encode error")
+		}
 	})
 
 	mux.HandleFunc("/api/candles", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		symbol := r.URL.Query().Get("symbol")
 		if symbol == "" {
 			http.Error(w, `{"error":"symbol required"}`, http.StatusBadRequest)
 			return
 		}
-		
-		candles := mgr.GetCandles(symbol)
-		json.NewEncoder(w).Encode(candles)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(mgr.GetCandles(symbol)); err != nil {
+			log.Error().Err(err).Msg("/api/candles encode error")
+		}
 	})
 
-	// Serve the dashboard statically
-	fs := http.FileServer(http.Dir("./web"))
-	mux.Handle("/", fs)
+	mux.Handle("/", http.FileServer(http.Dir("./web")))
 
 	srv := &http.Server{
 		Addr:         ":" + port,
@@ -322,30 +334,30 @@ func main() {
 	}
 
 	go func() {
-		log.Info().Str("port", port).Msg("Starting health server")
+		log.Info().Str("port", port).Msg("HTTP server started")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("HTTP server failed")
+			log.Fatal().Err(err).Msg("HTTP server error")
 		}
 	}()
 
-	// 8. Start Ingestion
+	// ── Ingestion ─────────────────────────────────────────────────────────────
+
 	go ingester.StartBinanceStream(ctx, watchlist, mgr)
 
-	// Wait for termination
 	<-ctx.Done()
-	log.Info().Msg("Shutting down gracefully...")
+	log.Info().Msg("Shutdown signal received")
 
-	// Save final state
 	if err := trader.SaveState(stateFile); err != nil {
-		log.Error().Err(err).Msg("Failed to save final state")
+		log.Error().Err(err).Msg("Final state save failed")
 	}
 
-	// Cleanup
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	srv.Shutdown(shutdownCtx)
-	
-	log.Info().Msg("Exit.")
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error().Err(err).Msg("HTTP shutdown error")
+	}
+
+	log.Info().Msg("Shutdown complete")
 }
 
 func getEnvInt(key string, fallback int) int {
@@ -357,7 +369,7 @@ func getEnvInt(key string, fallback int) int {
 	return fallback
 }
 
-func getEnvDecimal(key string, fallback string) decimal.Decimal {
+func getEnvDecimal(key, fallback string) decimal.Decimal {
 	if val := os.Getenv(key); val != "" {
 		if d, err := decimal.NewFromString(val); err == nil {
 			return d
