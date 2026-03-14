@@ -49,6 +49,17 @@ func NewTelegramNotifier(token, chatID string) *TelegramNotifier {
 	}
 }
 
+// redactToken replaces the bot token in an error string with [REDACTED] so
+// that tokens are never written to logs.  Go's net/http embeds the full URL
+// (including the token) in transport-level errors.
+func (t *TelegramNotifier) redactToken(err error) error {
+	if err == nil || t.Token == "" {
+		return err
+	}
+	safe := strings.ReplaceAll(err.Error(), t.Token, "[REDACTED]")
+	return fmt.Errorf("%s", safe) //nolint:err113
+}
+
 // Notify sends a message asynchronously to avoid blocking the trading goroutine.
 func (t *TelegramNotifier) Notify(message string) {
 	if t.Token == "" || t.ChatID == "" {
@@ -66,7 +77,7 @@ func (t *TelegramNotifier) Notify(message string) {
 		body, _ := json.Marshal(payload)
 		resp, err := t.client.Post(url, "application/json", bytes.NewBuffer(body))
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to send Telegram notification")
+			log.Error().Err(t.redactToken(err)).Msg("Failed to send Telegram notification")
 			return
 		}
 		defer resp.Body.Close()
@@ -107,7 +118,7 @@ func (t *TelegramNotifier) StartListening(ctx context.Context, handler CommandHa
 				if ctx.Err() != nil {
 					return // shutdown in progress
 				}
-				log.Warn().Err(err).Msg("Telegram poll error, retrying in 5s")
+				log.Warn().Err(t.redactToken(err)).Msg("Telegram poll error, retrying in 5s")
 				select {
 				case <-ctx.Done():
 					return
