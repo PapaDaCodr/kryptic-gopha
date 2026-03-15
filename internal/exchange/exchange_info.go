@@ -3,6 +3,8 @@ package exchange
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strconv"
 	"sync"
 
 	"github.com/shopspring/decimal"
@@ -81,6 +83,20 @@ func (c *Client) GetSymbolInfo(symbol string) (SymbolInfo, error) {
 		return SymbolInfo{}, fmt.Errorf("symbol %s not found in exchange info", symbol)
 	}
 	return info, nil
+}
+
+// SetLeverage sets the isolated leverage for a symbol. Call once per symbol on
+// startup before placing any orders. Binance requires leverage to be set
+// explicitly; the default on a new testnet account is typically 20x but varies.
+func (c *Client) SetLeverage(symbol string, leverage int) error {
+	params := url.Values{}
+	params.Set("symbol", symbol)
+	params.Set("leverage", strconv.Itoa(leverage))
+	_, err := c.post("/fapi/v1/leverage", params)
+	if err != nil {
+		return fmt.Errorf("set leverage %s×%d: %w", symbol, leverage, err)
+	}
+	return nil
 }
 
 // RoundToStepSize rounds qty down to the nearest valid LOT_SIZE increment.

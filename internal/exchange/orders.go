@@ -63,7 +63,7 @@ func (c *Client) PlaceStopMarketOrder(symbol string, side OrderSide, qty, stopPr
 	params.Set("type", "STOP_MARKET")
 	params.Set("quantity", qty.String())
 	params.Set("stopPrice", stopPrice.StringFixed(8))
-	params.Set("closePosition", "false")
+	params.Set("reduceOnly", "true")
 
 	body, err := c.post("/fapi/v1/order", params)
 	if err != nil {
@@ -80,7 +80,7 @@ func (c *Client) PlaceTakeProfitMarketOrder(symbol string, side OrderSide, qty, 
 	params.Set("type", "TAKE_PROFIT_MARKET")
 	params.Set("quantity", qty.String())
 	params.Set("stopPrice", stopPrice.StringFixed(8))
-	params.Set("closePosition", "false")
+	params.Set("reduceOnly", "true")
 
 	body, err := c.post("/fapi/v1/order", params)
 	if err != nil {

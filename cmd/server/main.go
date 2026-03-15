@@ -69,16 +69,25 @@ func main() {
 
 	// ── Trader Selection ──────────────────────────────────────────────────────
 
+	testnet := os.Getenv("BINANCE_TESTNET") == "true"
+	if testnet {
+		log.Info().Msg("Binance Testnet mode enabled (testnet.binancefuture.com)")
+	}
+
 	var trader engine.Trader
 	tradingMode := os.Getenv("TRADING_MODE")
 
 	if tradingMode == "live" {
 		apiKey := os.Getenv("BINANCE_API_KEY")
+		// Support both BINANCE_API_SECRET (canonical) and BINANCE_SECRET_KEY (legacy alias)
 		apiSecret := os.Getenv("BINANCE_API_SECRET")
+		if apiSecret == "" {
+			apiSecret = os.Getenv("BINANCE_SECRET_KEY")
+		}
 		if apiKey == "" || apiSecret == "" {
 			log.Fatal().Msg("TRADING_MODE=live requires BINANCE_API_KEY and BINANCE_API_SECRET")
 		}
-		exClient := exchange.NewClient(apiKey, apiSecret)
+		exClient := exchange.NewClient(apiKey, apiSecret, testnet)
 		lt := engine.NewLiveTrader(exClient, getEnvFloat("INITIAL_BALANCE", 1000.0))
 		lt.TP = getEnvDecimal("TP", "0.005")
 		lt.SL = getEnvDecimal("SL", "0.003")
@@ -88,6 +97,15 @@ func main() {
 		lt.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.003")
 		if err := lt.SyncBalance(); err != nil {
 			log.Warn().Err(err).Msg("Could not sync live balance; using fallback")
+		}
+		// Set leverage for all watched symbols. Default: 10x, configurable via LEVERAGE env var.
+		leverage := getEnvInt("LEVERAGE", 10)
+		for _, sym := range watchlist {
+			if err := exClient.SetLeverage(sym, leverage); err != nil {
+				log.Warn().Err(err).Str("symbol", sym).Int("leverage", leverage).Msg("SetLeverage failed")
+			} else {
+				log.Info().Str("symbol", sym).Int("leverage", leverage).Msg("Leverage set")
+			}
 		}
 		trader = lt
 		log.Info().Msg("Trading mode: LIVE (Binance USDT-M Futures)")
@@ -205,10 +223,14 @@ func main() {
 	log.Info().Int("bar_interval_seconds", barSeconds).Msg("Bar interval configured")
 
 	// Warm-up: seed price history from REST klines so the strategy can produce
-	// valid signals on the first live bar rather than waiting for MacroPeriod bars.
-	log.Info().Int("symbols", len(watchlist)).Msg("Warm-up: fetching historical klines")
+	// valid signals on the first live bar. EMA(200) requires at least 200 bars to
+	// stabilise, so we fetch 250 to give all indicators a comfortable margin.
+	klineInterval := barSecondsToInterval(barSeconds)
+	const warmupBars = 250
+	log.Info().Int("symbols", len(watchlist)).Str("interval", klineInterval).Int("bars", warmupBars).
+		Msg("Warm-up: fetching historical klines")
 	for _, symbol := range watchlist {
-		ticks, err := ingester.FetchHistoricalKlines(symbol, "1m", 100)
+		ticks, err := ingester.FetchHistoricalKlines(symbol, klineInterval, warmupBars)
 		if err != nil {
 			log.Error().Err(err).Str("symbol", symbol).Msg("Warm-up fetch failed; starting cold")
 			continue
@@ -342,7 +364,7 @@ func main() {
 
 	// ── Ingestion ─────────────────────────────────────────────────────────────
 
-	go ingester.StartBinanceStream(ctx, watchlist, mgr)
+	go ingester.StartBinanceStream(ctx, watchlist, mgr, testnet)
 
 	<-ctx.Done()
 	log.Info().Msg("Shutdown signal received")
@@ -358,6 +380,31 @@ func main() {
 	}
 
 	log.Info().Msg("Shutdown complete")
+}
+
+// barSecondsToInterval converts a bar duration in seconds to the Binance kline
+// interval string used by both the REST warm-up and WebSocket stream APIs.
+func barSecondsToInterval(seconds int) string {
+	switch seconds {
+	case 15:
+		return "15s"
+	case 30:
+		return "30s"
+	case 60:
+		return "1m"
+	case 180:
+		return "3m"
+	case 300:
+		return "5m"
+	case 900:
+		return "15m"
+	case 1800:
+		return "30m"
+	case 3600:
+		return "1h"
+	default:
+		return "1m"
+	}
 }
 
 func getEnvInt(key string, fallback int) int {

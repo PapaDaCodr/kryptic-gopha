@@ -16,7 +16,8 @@ import (
 
 const (
 	defaultBaseURL    = "https://fapi.binance.com"
-	defaultRecvWindow = 5000 // milliseconds; generous window for clock skew on VPS
+	testnetBaseURL    = "https://testnet.binancefuture.com"
+	defaultRecvWindow = 10000 // milliseconds; generous window for clock skew on VPS
 )
 
 // Client is an authenticated Binance USDT-M Futures REST client.
@@ -29,13 +30,18 @@ type Client struct {
 	http      *http.Client
 }
 
-// NewClient constructs an authenticated Binance Futures client using
-// HMAC-SHA256 request signing.
-func NewClient(apiKey, secretKey string) *Client {
+// NewClient constructs an authenticated Binance Futures client.
+// When testnet is true it points at testnet.binancefuture.com; use API keys
+// created at https://testnet.binancefuture.com for that environment.
+func NewClient(apiKey, secretKey string, testnet bool) *Client {
+	base := defaultBaseURL
+	if testnet {
+		base = testnetBaseURL
+	}
 	return &Client{
 		apiKey:    apiKey,
 		secretKey: secretKey,
-		baseURL:   defaultBaseURL,
+		baseURL:   base,
 		http:      &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -43,7 +49,7 @@ func NewClient(apiKey, secretKey string) *Client {
 // newClientWithBase overrides the base URL. Used in tests to redirect
 // requests to an httptest.Server without modifying the public API surface.
 func newClientWithBase(apiKey, secretKey, baseURL string) *Client {
-	c := NewClient(apiKey, secretKey)
+	c := NewClient(apiKey, secretKey, false)
 	c.baseURL = baseURL
 	return c
 }

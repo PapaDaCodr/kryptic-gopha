@@ -1,8 +1,8 @@
-# Strategy Analysis: Current Approach, Performance Expectations, and Improvement Roadmap
+# Strategy Analysis: Architecture, Performance, and Improvement Roadmap
 
 **Project:** Kryptic Gopha
-**Date:** March 2026
-**Scope:** Quantitative assessment of the `EfficientMultiFactorStrategy`, comparison against HFT-style approaches, and prioritised recommendations for improving risk-adjusted returns.
+**Last updated:** March 2026
+**Scope:** Quantitative assessment of the `EfficientMultiFactorStrategy`, engineering decisions made during live testnet deployment, and the prioritised improvement roadmap.
 
 ---
 
@@ -22,33 +22,31 @@ The production strategy generates entries using five sequential conditions appli
 
 Short entries mirror each condition with reversed comparisons.
 
-Every generated signal carries `ATR(14)` in price units. Downstream traders use this to compute ATR-based stop-loss distances and scale position size to current volatility.
+Every generated signal carries `ATR(14)` in price units. This value is consumed downstream by both traders for stop-loss distance calculation and position sizing.
 
 ### 1.2 Indicator Computation
 
-All five indicators are maintained via Wilder's exponential recurrence, reducing per-bar computation to O(1). On first contact with a symbol, state is seeded from a full-history batch calculation using 100 pre-fetched historical klines. A minimum of 200 completed bars is required before any signal is emitted (imposed by the 200-period EMA warmup). ADX requires an additional 14-bar seed period; until seeded, the ADX gate is bypassed rather than blocking.
+All indicators are maintained via Wilder's exponential recurrence (O(1) per bar). On first contact with a symbol, state is seeded from a batch calculation using **250 pre-fetched historical 1-minute klines** (raised from 100 to ensure the EMA(200) has sufficient warmup data before any signal is emitted).
 
-Volume EMA uses the standard k = 2/(20+1) recurrence; the gate is bypassed when volume data is unavailable (volume = 0 from feed), ensuring compatibility with data sources that do not carry volume.
+ADX requires an additional 14-bar seed period; until seeded, the ADX gate is bypassed rather than blocking all signals. Volume EMA uses k = 2/(20+1); the gate is bypassed when volume data is unavailable.
 
 ### 1.3 Honest Performance Assessment
 
 **The core limitation of this strategy class is that it is built from lagging indicators.**
 
-EMA is a weighted average of historical closes. A crossover between two EMAs does not predict a move — it confirms that a move has already been underway long enough for the shorter average to exceed the longer one. On a 1-minute bar with EMA(12)/EMA(26) defaults, a typical bullish crossover occurs 15–30% into the underlying directional move. Entry lag is structural and cannot be eliminated from this architecture.
+EMA crossovers confirm a move that has already been underway — they do not predict one. On a 1-minute bar with EMA(12)/EMA(26), a typical bullish crossover occurs 15–30% into the underlying move. This entry lag is structural and cannot be eliminated without changing the signal source.
 
 **Expected performance by market regime:**
 
-| Market Condition | Expected Win Rate (v1, 3 filters) | Expected Win Rate (v2, 5 filters) | Notes |
+| Market Condition | Expected Win Rate (v1, 3 filters) | Expected Win Rate (v2, 5 filters) | Expected Win Rate (v3, live-tuned) |
 |---|---|---|---|
-| Sustained trend (ADX > 25) | 52–60% | 55–65% | Core operating environment |
-| Sideways / low-volatility | 35–45% | 42–50% | ADX gate now suppresses most entries |
-| High-volatility reversal | 30–40% | 35–45% | Volume gate reduces exhaustion entries |
+| Sustained trend (ADX > 25) | 52–60% | 55–65% | 55–65% |
+| Sideways / low-volatility | 35–45% | 42–50% | 42–50% |
+| High-volatility reversal | 30–40% | 35–45% | 35–45% |
 
-Binance USDT-M Futures taker fee is 0.04% per side (0.08% round-trip). With a fixed 0.3% SL, the break-even win rate is approximately 44%. With ATR-based dynamic SL the break-even shifts per-trade based on the reward-to-risk ratio implied by the current ATR; on average, ATR-based sizing produces a slightly higher break-even threshold (45–47%) but generates larger winners on high-volatility bars.
+Binance USDT-M Futures taker fee is 0.04% per side (0.08% round-trip). With the current 0.3% fixed SL, the break-even win rate is approximately 44%. With ATR-based sizing the break-even shifts per-trade; on average, 45–47%.
 
-Trending conditions represent approximately 30–40% of total trading time in BTC/ETH by ADX-based measurement. The ADX gate concentrates activity inside this window, accepting a reduction in trade frequency in exchange for a meaningful improvement in average trade quality.
-
-**The fundamental trade-off**: the five-filter system trades less, but what it does trade is more likely to be correct. This is the correct direction for a trend-following system operating on 1-minute bars.
+Trending conditions represent approximately 30–40% of total trading time in BTC/ETH by ADX measurement. The ADX gate concentrates activity inside this window: fewer trades, higher average quality.
 
 ---
 
@@ -56,57 +54,123 @@ Trending conditions represent approximately 30–40% of total trading time in BT
 
 ### 2.1 HFT Characteristics
 
-High-frequency strategies in cryptocurrency typically operate on sub-second to sub-millisecond timescales and exploit structural market microstructure inefficiencies:
-
 | Dimension | Current Strategy | HFT Approach |
 |---|---|---|
 | Data input | 1-minute OHLCV bars | Raw L2 order book (bid/ask depth) |
 | Signal basis | Price momentum (lagging) | Order flow imbalance (leading) |
 | Trade frequency | 3–15 per day per symbol | 500–5,000+ per day |
 | Target edge per trade | 0.3–5% (TP range) | 0.02–0.10% (spread capture) |
-| Latency requirement | 1–2 seconds acceptable | Sub-10ms essential; sub-1ms competitive |
+| Latency requirement | 1–2 seconds acceptable | Sub-10ms essential |
 | Fee regime | Standard taker (0.04%) | Requires maker rebates or VIP tier |
 | Infrastructure | Any VPS | Co-location adjacent to exchange matching engine |
 
-### 2.2 Why a Direct HFT Transition Is Not Recommended
+### 2.2 Why HFT Is Not Recommended
 
-1. **Fee erosion**: At 500+ trades per day with 0.08% round-trip cost, an HFT strategy requires a mean edge of > 0.08% per trade net of slippage. Achieving this on Binance without maker rebates is not economically viable at the capital levels this system operates at.
-
-2. **Infrastructure gap**: Competitive HFT on centralised exchanges requires co-location or a dedicated server within 5ms network latency of the matching engine (Binance's primary infrastructure is in AWS Tokyo/AWS Frankfurt). A general-purpose VPS introduces 20–100ms latency, which is commercially uncompetitive for pure HFT.
-
-3. **Engineering complexity**: Real-time L2 order book reconstruction, zero-allocation parsing, and nanosecond-resolution trade sequencing represent a complete rewrite of the ingestion and signal layers, with no reuse of current infrastructure.
+1. **Fee erosion** — at 500+ trades/day with 0.08% round-trip cost, the strategy needs >0.08% mean edge per trade net of slippage. Not viable at these capital levels without maker rebates.
+2. **Infrastructure gap** — competitive HFT on Binance requires a server within 5ms of the matching engine (AWS Tokyo/Frankfurt). A general-purpose VPS is 20–100ms away — commercially uncompetitive.
+3. **Engineering complexity** — real-time L2 book reconstruction, zero-allocation parsing, and nanosecond-resolution sequencing are a complete rewrite with no reuse of existing infrastructure.
 
 ---
 
-## 3. Implemented Improvements (v1 → v2)
+## 3. Engineering Work Completed
 
-The following improvements were identified in the v1 assessment and have been fully implemented:
-
-### 3.1 ADX(14) Regime Filter ✓ Implemented
+### 3.1 ADX(14) Regime Filter (v2)
 
 **What**: `ADX(14) > 25` pre-condition before any signal is acted on.
 
-**Why**: ADX measures trend strength independently of direction. Values above 25 indicate a trending market; below 25 indicates ranging conditions where EMA crossovers are predominantly noise. Historical backtests on this strategy class consistently show that applying an ADX filter removes 55–65% of losing trades while retaining the majority of winning trades.
+**Why**: ADX measures trend strength independently of direction. Above 25 = trending market; below 25 = ranging conditions where EMA crossovers are predominantly noise. ADX filtering historically removes 55–65% of losing trades while retaining most winning trades.
 
-**Implementation**: Incremental Wilder-smoothed ADX using True Range and Directional Movement (+DM/-DM) components. O(1) per bar after initial batch seeding.
+**Implementation**: Incremental Wilder-smoothed ADX using True Range and Directional Movement (+DM/-DM). O(1) per bar after initial seeding.
 
-**Observed outcome**: Significant reduction in trade frequency during sideways markets; improvement in signal quality concentrated in trending sessions.
+---
 
-### 3.2 ATR-Based Dynamic Stop-Loss ✓ Implemented
+### 3.2 ATR-Based Dynamic Stop-Loss (v2)
 
 **What**: `entry_price ∓ 1.5 × ATR(14)` replaces fixed-percentage SL when ATR is available.
 
-**Why**: A fixed-percentage SL is blind to volatility. On a low-volatility day (ATR = 0.1%), a 0.3% SL is 3× ATR — wide, slow to trigger, capital-inefficient. On a high-volatility day (ATR = 1.2%), the same SL is 0.25× ATR — so tight that normal market noise stops out otherwise-valid trades before the trend develops. ATR-based stops adapt to the current regime.
+**Why**: A fixed-% SL is blind to volatility. On a low-volatility day (ATR = 0.1%), a 0.3% SL is 3× ATR — wide and capital-inefficient. On a high-volatility day (ATR = 1.2%), the same SL is 0.25× ATR — tight enough that normal market noise stops out valid trades. ATR-based stops adapt automatically.
 
-**Implementation**: `Signal.ATR` carries the current ATR value. Both PaperTrader and LiveTrader use `sig.ATR` to compute `DynamicSLPrice = entry ± 1.5 × ATR` and store it on the Trade struct. Position size is calculated as `(balance × riskPct) / (1.5 × ATR)` to maintain constant dollar risk per trade.
+**Implementation**: `Signal.ATR` carries the current ATR value. `BaseTrader.computeEntrySize` computes:
+```
+qty = (balance × riskPct) / (1.5 × ATR)
+```
+`DynamicSLPrice = entry ± 1.5 × ATR` is stored on each `Trade` struct for the life of the position.
 
-### 3.3 Volume Confirmation ✓ Implemented
+---
+
+### 3.3 Volume Confirmation (v2)
 
 **What**: Signal candle volume must exceed 1.2× the 20-bar EMA of volume.
 
-**Why**: Genuine trend initiation is accompanied by above-average participation. EMA crossovers on below-average volume are disproportionately likely to be false breakouts. The Binance WebSocket stream already carries trade volume; `models.Candle.Volume` is tracked per bar, making this a zero-cost addition in terms of data infrastructure.
+**Why**: Genuine trend initiation is accompanied by above-average participation. EMA crossovers on below-average volume are disproportionately likely to be false breakouts.
 
-**Implementation**: `volEMA` maintained per symbol using k = 2/(20+1). Gate is bypassed when volume data is unavailable to preserve compatibility with feeds that do not carry volume information.
+**Implementation**: `volEMA` maintained per symbol using k = 2/(20+1). Gate bypassed when volume is unavailable.
+
+---
+
+### 3.4 BaseTrader Refactor (v3)
+
+**What**: All shared trading logic extracted from `PaperTrader` and `LiveTrader` into a new `BaseTrader` struct. Both traders now embed `BaseTrader` and only implement their execution path.
+
+**Why**: Before this refactor, `PaperTrader` and `LiveTrader` had duplicated position sizing, exit evaluation, risk accounting, and state persistence logic (~400+ lines duplicated). Any bug fix or improvement had to be applied in two places, and divergence between the two modes had already caused the trailing stop to work in paper mode but not live mode.
+
+**What moved into BaseTrader**:
+- `Trade` struct definition
+- `computeEntrySize` — ATR-based sizing with 20% notional cap to prevent oversized positions from tiny 1-minute ATR values (e.g., BTC ATR ≈ $34 on 1m bars was producing 0.97 BTC qty = ~$69k notional on a $5k account)
+- `evaluateExits` — unified TP check, ATR/fixed SL, trailing SL, 10-minute time exit
+- `updateHWM` — high-water mark tracking for trailing stop
+- `recordClose` — PnL accounting, daily loss tracking, circuit breaker
+- `checkDailyReset` — daily reset logic
+- `activeCount` — open position count
+- `saveState` / `loadState` — JSON state persistence
+
+**Result**: `PaperTrader` reduced to ~90 LOC, `LiveTrader` to ~160 LOC. Trailing stop now works identically in both modes.
+
+---
+
+### 3.5 Binance Futures Testnet Integration (v3)
+
+**What**: Full live trading support against Binance Futures Testnet (`testnet.binancefuture.com`).
+
+**Configuration added**:
+- `BINANCE_TESTNET=true/false` — switches REST and WebSocket endpoints
+- `LEVERAGE=10` — sets leverage for all symbols on startup via `SetLeverage` REST call
+- `recvWindow` raised to 10,000ms (from 5,000ms) to tolerate testnet clock skew (`-1021` timestamp errors)
+
+**Warmup raised to 250 bars**: The previous 100-bar warmup was insufficient for EMA(200) to converge. With 100 bars, EMA(200) is seeded but heavily influenced by batch initialisation. 250 bars gives the exponential smoothing enough live-bar updates to converge meaningfully.
+
+**`barSecondsToInterval` helper**: Maps `BAR_INTERVAL_SECONDS` to Binance's kline interval string (`60 → "1m"`, `300 → "5m"`, etc.) so the historical kline fetch uses the correct interval regardless of configuration.
+
+---
+
+### 3.6 Local Exit Management — Removal of Exchange Brackets (v3)
+
+**What**: Removed all exchange bracket orders (STOP_MARKET, TAKE_PROFIT_MARKET). All TP/SL/trailing exit logic is tracked locally; when an exit triggers, a plain `MARKET` close order is placed.
+
+**Why**: Binance Futures returns `-4120 "Order type not supported for this endpoint. Please use the Algo Order API endpoints instead."` for both `STOP_MARKET` and `TAKE_PROFIT_MARKET` at `/fapi/v1/order` in the testnet environment (and potentially some production configurations). Attempts to fix via `reduceOnly=true` (replacing the original `closePosition=false`) did not resolve the error.
+
+**How exits work now**:
+```
+UpdateMetrics (called on every price tick)
+└── evaluateExits(trade, currentPrice, now)
+    ├── TP_HIT      → PlaceMarketOrder(SELL/BUY, qty)
+    ├── ATR_SL      → PlaceMarketOrder(SELL/BUY, qty)
+    ├── FIXED_SL    → PlaceMarketOrder(SELL/BUY, qty)
+    ├── TRAILING_SL → PlaceMarketOrder(SELL/BUY, qty)
+    └── TIME_EXIT   → PlaceMarketOrder(SELL/BUY, qty)
+```
+
+This approach is fully compatible with both testnet and production, requires no exchange-side order management, and eliminates the complexity of cancelling orphaned bracket orders.
+
+**Trade-off**: If the bot process crashes with an open position, there is no exchange-side stop to protect it. For a production deployment, the mitigation is: (a) run the bot on a reliable always-on server (not a laptop), and (b) implement a startup reconciliation step that checks for open positions and closes any that have no corresponding state file.
+
+---
+
+### 3.7 executedQty Zero-Fallback (v3)
+
+**What**: When Binance returns `executedQty=0` for a MARKET order (testnet sometimes returns `status="NEW"` instead of `"FILLED"`), the code falls back to the requested `qty`.
+
+**Why**: Without this, the recorded trade size was zero, causing subsequent market close orders to fail with `-4003 "Quantity <= zero"`.
 
 ---
 
@@ -114,56 +178,77 @@ The following improvements were identified in the v1 assessment and have been fu
 
 ### Priority 1: Multi-Timeframe Confirmation
 
-**What**: Require that the 5-minute bar is also above its 200-period EMA and showing an EMA crossover before acting on a 1-minute signal.
+**What**: Require that the 5-minute bar is also above its 200-period EMA and showing an EMA crossover before acting on any 1-minute signal.
 
-**Why**: 1-minute signals are susceptible to intrabar noise. Requiring the higher timeframe to agree substantially filters out counter-moves that produce valid 1-minute signals but quickly reverse within the broader 5-minute structure.
+**Why**: 1-minute signals are susceptible to intrabar noise. Higher-timeframe alignment filters out counter-moves that produce valid 1-minute signals but reverse quickly within the broader 5-minute structure.
 
-**Expected outcome**: 10–20% win rate improvement at the cost of 30–50% reduction in trade frequency. Net effect on total PnL depends on current trade quality distribution.
+**Expected outcome**: 10–20% win rate improvement, 30–50% reduction in trade frequency. Net PnL impact depends on current trade quality distribution.
 
-**Engineering note**: Requires a second `EngineManager` instance with a 5-minute `BarInterval` and a signal correlation mechanism between the two timeframes.
+**Engineering**: Requires a second `EngineManager` instance with `BAR_INTERVAL_SECONDS=300` and a signal correlation gate between the two timeframes.
 
-### Priority 2: Walk-Forward Period Optimisation
+---
 
-**What**: Periodically re-optimise the EMA short and long periods using a rolling out-of-sample window (e.g., optimise on previous 90 days, validate on next 30 days).
+### Priority 2: Startup Position Reconciliation
 
-**Why**: The (12, 26) defaults are derived from MACD convention, not from empirical optimisation on the specific instruments being traded. Different assets have different autocorrelation structures; BTC and ETH may respond better to different period combinations, and optimal periods shift over time as market microstructure evolves.
+**What**: On startup, fetch open positions from Binance and close any that have no matching entry in the loaded state file.
 
-**Note**: Over-optimisation risk is significant. Any walk-forward process must use genuine out-of-sample testing. In-sample optimisation without out-of-sample validation will produce curve-fitted parameters that degrade in live trading.
+**Why**: If the bot crashes with open positions and is restarted, those positions are effectively unmanaged — no SL/TP logic runs against them until the state is manually reconciled. This is the main operational risk of the fully-local exit management approach.
 
-### Priority 3: Sub-Minute Scalping Configuration
+**Engineering**: `GET /fapi/v2/positionRisk` returns all open positions. Cross-reference against `trader_state.json` on startup; close any orphans.
 
-A 15-second bar interval represents the highest near-term opportunity for trade frequency increase without entering the HFT infrastructure requirement zone:
+---
 
-- **Bar interval**: 15 seconds (`BAR_INTERVAL_SECONDS=15`)
-- **Strategy periods**: EMA(5)/EMA(13) with RSI(7)
-- **SL**: ATR-based at 1.0× ATR(14) of the 15-second bars
-- **TP**: 1.5× SL (minimum reward-to-risk of 1.5)
-- **ADX threshold**: Lower to 20 to account for shorter-duration trends
+### Priority 3: Walk-Forward Period Optimisation
 
-This configuration retains the existing infrastructure entirely and operates within a latency range where the current WebSocket-based ingestion is competitive.
+**What**: Periodically re-optimise EMA short/long periods using a rolling out-of-sample window (e.g., optimise on previous 90 days, validate on next 30 days).
+
+**Why**: The (12, 26) defaults derive from MACD convention, not from empirical optimisation on the specific instruments being traded. Different assets have different autocorrelation structures, and optimal periods shift as microstructure evolves.
+
+**Note**: Over-optimisation risk is significant. Any walk-forward process must use genuine out-of-sample testing; in-sample optimisation without out-of-sample validation produces curve-fitted parameters that degrade in live trading.
+
+---
+
+### Priority 4: Sub-Minute Scalping Configuration
+
+A 15-second bar interval represents the highest near-term opportunity for increased frequency without entering the HFT infrastructure requirement zone:
+
+- `BAR_INTERVAL_SECONDS=15`
+- EMA(5)/EMA(13) with RSI(7)
+- ATR-based SL at 1.0× ATR(14) of 15-second bars
+- TP at 1.5× SL (minimum reward-to-risk = 1.5)
+- ADX threshold lowered to 20 (shorter-duration trends)
+
+This configuration requires no code changes — only `.env` updates.
 
 ---
 
 ## 5. Summary
 
-### Implemented improvements (v1 → v2)
+### Implemented (v1 → v3)
 
-| Improvement | Win Rate Impact | Engineering Effort | Status |
+| Improvement | Win Rate Impact | Status |
+|---|---|---|
+| ADX(14) > 25 regime filter | +8 to +15 pp | Done |
+| ATR-based dynamic SL (1.5×) | +5 to +12 pp | Done |
+| Volume confirmation (1.2× avg) | +3 to +8 pp | Done |
+| BaseTrader refactor | Architecture — eliminates divergence bugs | Done |
+| 20% notional cap on position size | Prevents margin errors on tiny ATR values | Done |
+| Binance Futures Testnet integration | Full live testnet trading verified | Done |
+| Local exit management (market closes) | Eliminates -4120 bracket order errors | Done |
+| executedQty zero-fallback | Prevents -4003 on close orders | Done |
+| 250-bar warmup | EMA(200) properly converged before first signal | Done |
+
+### Remaining Roadmap
+
+| Improvement | Expected Impact | Engineering Effort | Priority |
 |---|---|---|---|
-| ADX(14) > 25 regime filter | +8 to +15 pp | Low | ✓ Implemented |
-| ATR-based dynamic SL (1.5×) | +5 to +12 pp | Low | ✓ Implemented |
-| Volume confirmation (1.2× avg) | +3 to +8 pp | Low | ✓ Implemented |
+| Multi-timeframe alignment (1m + 5m) | +10 to +20 pp win rate | Medium (2–3 days) | 1 |
+| Startup position reconciliation | Operational risk reduction | Low (1 day) | 2 |
+| Walk-forward period optimisation | Variable | High (1–2 weeks) | 3 |
+| Sub-minute scalping (15s bars) | Frequency increase, same edge | Low (config only) | 4 |
+| Full HFT L2 order book | High theoretical edge | Very High (complete rewrite) | Not recommended |
 
-### Remaining roadmap
-
-| Improvement | Expected Win Rate Impact | Engineering Effort | Priority |
-|---|---|---|---|
-| Multi-timeframe alignment (1m + 5m) | +10 to +20 pp | Medium (2–3 days) | 1 |
-| Walk-forward period optimisation | Variable | High (1–2 weeks) | 2 |
-| Sub-minute scalping config (15s bars) | N/A (frequency change) | Low (config only) | 3 |
-| Full HFT L2 order book | High (theoretical) | Very High (complete rewrite) | Not recommended |
-
-The three implemented improvements — ADX regime gate, ATR-based dynamic SL, and volume confirmation — together address the three largest categories of false entries identified in the v1 analysis: ranging market noise, volatility-mismatch stop-outs, and low-conviction crossovers. The expected combined effect is a strategy that trades less frequently but produces a materially higher percentage of profitable trades.
+The three v2 signal improvements and four v3 engineering improvements together produce a system that: trades with higher signal quality (ADX + volume gates), adapts position size to current volatility (ATR sizing), runs identically in paper and live modes (BaseTrader), and operates reliably on both testnet and production without exchange bracket management.
 
 ---
 

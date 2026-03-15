@@ -18,8 +18,9 @@ import (
 var binanceRestURL = "https://api.binance.com"
 
 const (
-	binanceStreamURL       = "wss://stream.binance.com:9443/stream?streams="
-	streamSuffix           = "@trade"
+	binanceStreamURL        = "wss://stream.binance.com:9443/stream?streams="
+	binanceTestnetStreamURL = "wss://stream.binancefuture.com/stream?streams="
+	streamSuffix            = "@trade"
 	initialRetryDelay      = time.Second
 	maxRetryDelay          = 30 * time.Second
 	retryBackoffMultiplier = 1.5
@@ -80,9 +81,13 @@ func FetchHistoricalKlines(symbol, interval string, limit int) ([]models.MarketT
 	return ticks, nil
 }
 
-func StartBinanceStream(ctx context.Context, symbols []string, mgr *engine.EngineManager) {
+func StartBinanceStream(ctx context.Context, symbols []string, mgr *engine.EngineManager, testnet bool) {
 	normalizedSymbols := normalizeSymbols(symbols)
-	url := binanceStreamURL + strings.Join(normalizedSymbols, "/")
+	streamBase := binanceStreamURL
+	if testnet {
+		streamBase = binanceTestnetStreamURL
+	}
+	url := streamBase + strings.Join(normalizedSymbols, "/")
 
 	retryDelay := initialRetryDelay
 
