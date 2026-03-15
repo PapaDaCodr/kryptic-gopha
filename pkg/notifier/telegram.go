@@ -12,13 +12,11 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// CommandHandler is a callback for a parsed Telegram command.
 type CommandHandler func(command string, args []string) string
 
-// Notifier defines the interface for sending alerts.
 type Notifier interface {
 	Notify(message string)
-	// StartListening polls for incoming commands until ctx is cancelled.
+	// StartListening polls for incoming Telegram commands until ctx is cancelled.
 	StartListening(ctx context.Context, handler CommandHandler)
 }
 
@@ -26,16 +24,12 @@ type Notifier interface {
 // The pollClient timeout must exceed this value.
 const longPollTimeout = 30
 
-// TelegramNotifier sends messages via a Telegram Bot.
 type TelegramNotifier struct {
-	Token   string
-	ChatID  string
-	apiBase string // base URL; defaults to https://api.telegram.org
-	// client is used for short outbound requests (sendMessage, etc.).
-	client *http.Client
-	// pollClient is used exclusively for long-poll getUpdates calls.
-	// Its timeout must exceed longPollTimeout to avoid cutting responses short.
-	pollClient *http.Client
+	Token      string
+	ChatID     string
+	apiBase    string       // overridable in tests
+	client     *http.Client // short-lived requests (sendMessage, etc.)
+	pollClient *http.Client // long-poll getUpdates; timeout must exceed longPollTimeout
 	updateID   int
 }
 
@@ -88,7 +82,6 @@ func (t *TelegramNotifier) Notify(message string) {
 	}()
 }
 
-// StartListening polls Telegram for commands until ctx is cancelled.
 func (t *TelegramNotifier) StartListening(ctx context.Context, handler CommandHandler) {
 	if t.Token == "" {
 		return

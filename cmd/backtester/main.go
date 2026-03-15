@@ -31,7 +31,6 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to fetch klines")
 	}
 
-	// Declare as Trader interface so the report uses only the public contract.
 	var trader engine.Trader = engine.NewPaperTrader(10000.0)
 	strategy := engine.NewEfficientStrategy(12, 26, 14)
 	mgr := engine.NewEngineManager([]string{*symbol}, 1000, strategy, trader)

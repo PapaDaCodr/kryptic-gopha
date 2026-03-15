@@ -9,9 +9,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// symbolState holds per-symbol mutable state. The embedded mutex ensures that
-// concurrent WebSocket ticks for the same symbol are serialised, while ticks
-// for different symbols run in parallel.
+// symbolState is per-symbol mutable state. Ticks for different symbols are
+// processed in parallel; ticks for the same symbol are serialised by the mutex.
 type symbolState struct {
 	sync.Mutex
 	history        []models.Candle
@@ -50,9 +49,8 @@ func NewEngineManager(symbols []string, bufferSize int, strategy Strategy, trade
 	return mgr
 }
 
-// UpdatePrice processes a single market tick: updates open trades via the
-// trader, aggregates into the current candle, and on bar close runs the
-// strategy and dispatches any resulting signal.
+// UpdatePrice updates open trades, aggregates the tick into the current OHLCV
+// bar, and on bar close runs the strategy and dispatches any resulting signal.
 func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	point, err := tick.ToPricePoint()
 	if err != nil {
@@ -107,12 +105,9 @@ func (m *EngineManager) UpdatePrice(tick models.MarketTick) error {
 	return nil
 }
 
-// analyzeInternal runs the strategy on the completed bar's price history and
-// forwards any new signal to the Signals channel. Signal deduplication prevents
-// flooding during sustained trends: the same direction is suppressed for 5
-// minutes unless the direction changes.
-//
-// Must be called with state.Lock held.
+// analyzeInternal runs the strategy and forwards the result to Signals.
+// The same direction is suppressed for 5 minutes to prevent flooding during
+// sustained trends. Must be called with state.Lock held.
 func (m *EngineManager) analyzeInternal(symbol string, state *symbolState) {
 	signal := m.Strategy.Analyze(symbol, state.history)
 	if signal == nil {
@@ -158,7 +153,6 @@ func (m *EngineManager) GetCandles(symbol string) []models.Candle {
 	return res
 }
 
-// GetSignals returns the most recent signal history for a symbol (up to 100 entries).
 func (m *EngineManager) GetSignals(symbol string) []models.Signal {
 	state, exists := m.states[symbol]
 	if !exists {

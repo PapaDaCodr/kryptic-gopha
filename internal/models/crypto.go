@@ -14,7 +14,6 @@ type MarketTick struct {
 	Timestamp int64  `json:"T"`
 }
 
-// PricePoint is a parsed, typed representation of a single market tick.
 type PricePoint struct {
 	Price     decimal.Decimal `json:"price"`
 	Timestamp time.Time       `json:"timestamp"`
@@ -37,7 +36,6 @@ type Signal struct {
 	ATR        decimal.Decimal `json:"atr,omitempty"`
 }
 
-// Candle is a completed OHLCV bar.
 type Candle struct {
 	Symbol string          `json:"symbol"`
 	Open   decimal.Decimal `json:"open"`
@@ -48,8 +46,8 @@ type Candle struct {
 	Time   time.Time       `json:"timestamp"`
 }
 
-// ToPricePoint parses the string-encoded price and millisecond timestamp
-// from the raw WebSocket event into a typed PricePoint.
+// ToPricePoint converts the raw WebSocket event into a typed PricePoint.
+// Price is string-encoded in the Binance stream to preserve decimal precision.
 func (mt MarketTick) ToPricePoint() (PricePoint, error) {
 	p, err := decimal.NewFromString(mt.Price)
 	if err != nil {

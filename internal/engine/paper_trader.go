@@ -9,8 +9,7 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// PaperTrader simulates trade execution against live market data without
-// placing real orders. All shared risk state and logic lives in BaseTrader.
+// PaperTrader simulates execution against live data. All risk logic lives in BaseTrader.
 type PaperTrader struct {
 	BaseTrader
 }

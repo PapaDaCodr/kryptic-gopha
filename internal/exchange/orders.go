@@ -9,7 +9,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// OrderSide is BUY or SELL.
 type OrderSide string
 
 const (
@@ -17,7 +16,6 @@ const (
 	SideSell OrderSide = "SELL"
 )
 
-// OrderResult is returned by order placement calls.
 type OrderResult struct {
 	OrderID     int64           `json:"orderId"`
 	Symbol      string          `json:"symbol"`
@@ -54,8 +52,6 @@ func (c *Client) PlaceMarketOrder(symbol string, side OrderSide, qty decimal.Dec
 	return parseOrderResult(body)
 }
 
-// PlaceStopMarketOrder submits a STOP_MARKET order used for stop-loss placement.
-// stopPrice is the trigger; the position is closed at market when hit.
 func (c *Client) PlaceStopMarketOrder(symbol string, side OrderSide, qty, stopPrice decimal.Decimal) (OrderResult, error) {
 	params := url.Values{}
 	params.Set("symbol", symbol)
@@ -72,7 +68,6 @@ func (c *Client) PlaceStopMarketOrder(symbol string, side OrderSide, qty, stopPr
 	return parseOrderResult(body)
 }
 
-// PlaceTakeProfitMarketOrder submits a TAKE_PROFIT_MARKET order.
 func (c *Client) PlaceTakeProfitMarketOrder(symbol string, side OrderSide, qty, stopPrice decimal.Decimal) (OrderResult, error) {
 	params := url.Values{}
 	params.Set("symbol", symbol)

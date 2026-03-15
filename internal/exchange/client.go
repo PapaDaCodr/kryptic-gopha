@@ -20,9 +20,7 @@ const (
 	defaultRecvWindow = 10000 // milliseconds; generous window for clock skew on VPS
 )
 
-// Client is an authenticated Binance USDT-M Futures REST client.
-// It is safe for concurrent use across goroutines; the underlying http.Client
-// manages connection pooling internally.
+// Client is an authenticated Binance USDT-M Futures REST client. Safe for concurrent use.
 type Client struct {
 	apiKey    string
 	secretKey string
@@ -30,9 +28,8 @@ type Client struct {
 	http      *http.Client
 }
 
-// NewClient constructs an authenticated Binance Futures client.
-// When testnet is true it points at testnet.binancefuture.com; use API keys
-// created at https://testnet.binancefuture.com for that environment.
+// NewClient returns a Binance Futures client. When testnet is true it targets
+// testnet.binancefuture.com; generate API keys on that site.
 func NewClient(apiKey, secretKey string, testnet bool) *Client {
 	base := defaultBaseURL
 	if testnet {
@@ -65,7 +62,6 @@ func (c *Client) sign(params url.Values) {
 	params.Set("signature", hex.EncodeToString(mac.Sum(nil)))
 }
 
-// publicGet issues an unauthenticated GET (e.g. /fapi/v1/exchangeInfo).
 func (c *Client) publicGet(path string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet,
 		fmt.Sprintf("%s%s", c.baseURL, path), nil)
@@ -75,7 +71,6 @@ func (c *Client) publicGet(path string) ([]byte, error) {
 	return c.doRequest(req, path)
 }
 
-// get issues a signed GET request with params in the query string.
 func (c *Client) get(path string, params url.Values) ([]byte, error) {
 	if params == nil {
 		params = url.Values{}
@@ -90,8 +85,7 @@ func (c *Client) get(path string, params url.Values) ([]byte, error) {
 	return c.doRequest(req, path)
 }
 
-// post issues a signed POST request with params in the query string.
-// Binance Futures order placement uses POST with query-string params, not a JSON body.
+// Binance Futures uses POST with query-string params for order placement, not a JSON body.
 func (c *Client) post(path string, params url.Values) ([]byte, error) {
 	if params == nil {
 		params = url.Values{}
@@ -107,8 +101,7 @@ func (c *Client) post(path string, params url.Values) ([]byte, error) {
 	return c.doRequest(req, path)
 }
 
-// delete issues a signed DELETE request. Binance Futures uses DELETE for
-// all order-cancellation endpoints.
+// Binance Futures uses DELETE for all order-cancellation endpoints.
 func (c *Client) delete(path string, params url.Values) ([]byte, error) {
 	if params == nil {
 		params = url.Values{}

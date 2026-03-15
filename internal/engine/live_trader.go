@@ -39,8 +39,8 @@ func NewLiveTrader(client *exchange.Client, fallbackBalance float64) *LiveTrader
 	return &LiveTrader{BaseTrader: base, client: client}
 }
 
-// SyncBalance fetches the live USDT balance from Binance. Call once after
-// construction so internal accounting reflects the real account state.
+// SyncBalance should be called once after construction to align internal
+// accounting with the real Binance balance.
 func (lt *LiveTrader) SyncBalance() error {
 	bal, err := lt.client.GetUSDTBalance()
 	if err != nil {
@@ -139,8 +139,6 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 	}
 }
 
-// UpdateMetrics evaluates exit conditions locally and places market close
-// orders when an exit triggers.
 func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal, now time.Time) {
 	lt.Lock()
 	defer lt.Unlock()
@@ -163,7 +161,6 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 
 		t.ExitReason = reason
 
-		// All exits: close at market.
 		closeSide := exchange.SideSell
 		if t.Direction == "SELL" {
 			closeSide = exchange.SideBuy
@@ -199,7 +196,8 @@ func (lt *LiveTrader) UpdateMetrics(symbol string, currentPrice decimal.Decimal,
 	}
 }
 
-// emergencyClose places a market order to unwind an unprotected entry.
+// emergencyClose unwinds an unprotected entry at market. Logs critical if the
+// close itself fails.
 func (lt *LiveTrader) emergencyClose(symbol string, side exchange.OrderSide, qty decimal.Decimal, reason string) {
 	if _, err := lt.client.PlaceMarketOrder(symbol, side, qty); err != nil {
 		log.Error().Err(err).Str("symbol", symbol).Str("reason", reason).

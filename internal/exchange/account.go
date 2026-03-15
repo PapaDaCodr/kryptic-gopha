@@ -14,7 +14,6 @@ type balanceEntry struct {
 	CrossWalletBalance string `json:"crossWalletBalance"`
 }
 
-// GetUSDTBalance returns the available USDT futures wallet balance.
 func (c *Client) GetUSDTBalance() (decimal.Decimal, error) {
 	body, err := c.get("/fapi/v2/balance", url.Values{})
 	if err != nil {
@@ -46,7 +45,6 @@ type positionRiskEntry struct {
 	PositionSide     string `json:"positionSide"`
 }
 
-// OpenPosition describes a live futures position.
 type OpenPosition struct {
 	Symbol           string
 	Quantity         decimal.Decimal
@@ -55,7 +53,6 @@ type OpenPosition struct {
 	Side             string // "LONG" or "SHORT"
 }
 
-// GetOpenPositions returns all non-zero positions for the account.
 func (c *Client) GetOpenPositions() ([]OpenPosition, error) {
 	body, err := c.get("/fapi/v2/positionRisk", url.Values{})
 	if err != nil {

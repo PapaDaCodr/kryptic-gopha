@@ -7,9 +7,8 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Trader is the minimal interface the engine and HTTP layer depend on.
-// Both PaperTrader and LiveTrader satisfy it, allowing the server to switch
-// modes without touching any routing or handler code.
+// Trader is the interface satisfied by both PaperTrader and LiveTrader,
+// allowing the server to switch modes without touching handler code.
 type Trader interface {
 	OnSignal(sig models.Signal)
 	UpdateMetrics(symbol string, currentPrice decimal.Decimal, now time.Time)
@@ -22,8 +21,6 @@ type Trader interface {
 	LoadState(filename string) error
 }
 
-// TraderStats is a lightweight snapshot of headline metrics suitable for
-// periodic logging, health checks, and the backtester report.
 type TraderStats struct {
 	TotalSignals int
 	TotalWins    int
@@ -32,7 +29,6 @@ type TraderStats struct {
 	ActiveTrades int
 }
 
-// TraderState is the full state snapshot returned by /api/state.
 type TraderState struct {
 	Balance        decimal.Decimal     `json:"balance"`
 	InitialBalance decimal.Decimal     `json:"initial_balance"`
@@ -44,7 +40,6 @@ type TraderState struct {
 	Completed      []Trade             `json:"completed"`
 }
 
-// TradesSnapshot is returned by /api/trades.
 type TradesSnapshot struct {
 	Active    map[string][]*Trade `json:"active"`
 	Completed []Trade             `json:"completed"`

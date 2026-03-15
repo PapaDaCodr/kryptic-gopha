@@ -10,7 +10,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// SymbolInfo holds the trading rules we need for order sizing.
 type SymbolInfo struct {
 	StepSize    decimal.Decimal // LOT_SIZE minimum quantity increment
 	MinQty      decimal.Decimal // Minimum order quantity
@@ -99,7 +98,8 @@ func (c *Client) SetLeverage(symbol string, leverage int) error {
 	return nil
 }
 
-// RoundToStepSize rounds qty down to the nearest valid LOT_SIZE increment.
+// RoundToStepSize floors qty to the nearest LOT_SIZE increment. Always rounds
+// down to avoid oversized orders that Binance would reject.
 func RoundToStepSize(qty, stepSize decimal.Decimal) decimal.Decimal {
 	if stepSize.IsZero() {
 		return qty

@@ -244,7 +244,6 @@ func (s *EfficientMultiFactorStrategy) Analyze(symbol string, candles []models.C
 	return nil
 }
 
-// candleCloses extracts the close price from each candle in chronological order.
 func candleCloses(candles []models.Candle) []decimal.Decimal {
 	out := make([]decimal.Decimal, len(candles))
 	for i, c := range candles {
@@ -275,7 +274,6 @@ func computeDM(curr, prev models.Candle) (tr, plusDM, minusDM float64) {
 	return
 }
 
-// computeDX returns the directional index given Wilder-smoothed TR/+DM/-DM.
 func computeDX(smTR, smPlusDM, smMinusDM float64) float64 {
 	if smTR == 0 {
 		return 0
@@ -409,8 +407,6 @@ func (s *EfficientMultiFactorStrategy) updateADX(symbol string, curr models.Cand
 	return 0
 }
 
-// initVolEMA seeds the volume EMA from a candle history batch using standard
-// exponential smoothing with k = 2/(volPeriod+1).
 func (s *EfficientMultiFactorStrategy) initVolEMA(symbol string, candles []models.Candle) {
 	if len(candles) == 0 {
 		return
@@ -425,7 +421,6 @@ func (s *EfficientMultiFactorStrategy) initVolEMA(symbol string, candles []model
 	s.volEMA[symbol] = ema
 }
 
-// updateVolEMA advances the volume EMA by one bar and returns the updated value.
 func (s *EfficientMultiFactorStrategy) updateVolEMA(symbol string, vol float64) float64 {
 	k := 2.0 / (float64(s.volPeriod) + 1.0)
 	updated := s.volEMA[symbol] + k*(vol-s.volEMA[symbol])
@@ -490,7 +485,6 @@ func (s *EfficientMultiFactorStrategy) initRSI(symbol string, prices []decimal.D
 	s.initialized[symbol] = true
 }
 
-// calculateIncrementalRSI advances the Wilder-smoothed RSI by one bar.
 func (s *EfficientMultiFactorStrategy) calculateIncrementalRSI(symbol string, prices []decimal.Decimal) decimal.Decimal {
 	n := decimal.NewFromInt(int64(s.RSIPeriod))
 	nm1 := decimal.NewFromInt(int64(s.RSIPeriod - 1))

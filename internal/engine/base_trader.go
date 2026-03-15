@@ -19,15 +19,8 @@ import (
 const atrSLMultiplier = 1.5
 
 // Trade is a single position record shared by PaperTrader and LiveTrader.
-//
-// DynamicSLPrice: when non-zero, this is the absolute stop-loss price computed
-// as entry ± (atrSLMultiplier × ATR) at signal time. evaluateExits uses this
-// level instead of the configured SL percentage, making the stop adaptive to
-// current volatility. When zero (ATR unavailable), the configured SL % is used.
-//
-// TPOrderID / SLOrderID: Binance order IDs for the bracket orders placed at
-// entry. Used by LiveTrader to cancel only the specific bracket belonging to
-// this trade, avoiding cancellation of other open positions on the same symbol.
+// DynamicSLPrice is the ATR-derived stop computed as entry ± (atrSLMultiplier × ATR)
+// at signal time; zero means the ATR was unavailable and the fixed SL % is used instead.
 type Trade struct {
 	Symbol         string                  `json:"symbol"`
 	EntryPrice     decimal.Decimal         `json:"entry_price"`
@@ -45,11 +38,8 @@ type Trade struct {
 	SLOrderID      int64                   `json:"sl_order_id,omitempty"`
 }
 
-// BaseTrader holds all risk state and logic that is identical between
-// PaperTrader and LiveTrader. Embed it and implement OnSignal/UpdateMetrics.
-//
-// JSON field names are kept compatible with the existing trader_state.json
-// format so old state files load correctly after the refactor.
+// BaseTrader holds all shared risk state. Embed it in a concrete trader and
+// implement OnSignal/UpdateMetrics.
 type BaseTrader struct {
 	sync.Mutex
 
@@ -97,8 +87,7 @@ func newBaseTrader(balance float64, mode string) BaseTrader {
 	}
 }
 
-// activeCount returns the total number of open trades across all symbols.
-// Must be called with b.Lock held.
+// activeCount must be called with b.Lock held.
 func (b *BaseTrader) activeCount() int {
 	n := 0
 	for _, trades := range b.ActiveTrades {
@@ -120,8 +109,7 @@ func (b *BaseTrader) checkDailyReset() {
 	}
 }
 
-// updateHWM advances the high-water mark for a trade. The HWM is used by the
-// trailing stop logic. Must be called with b.Lock held.
+// updateHWM must be called with b.Lock held.
 func (b *BaseTrader) updateHWM(t *Trade, price decimal.Decimal) {
 	if t.Direction == "BUY" && price.GreaterThan(t.HighWaterMark) {
 		t.HighWaterMark = price
@@ -130,8 +118,8 @@ func (b *BaseTrader) updateHWM(t *Trade, price decimal.Decimal) {
 	}
 }
 
-// slLevel returns the effective stop-loss price: ATR-derived when available,
-// fixed-percentage otherwise.
+// slLevel returns the ATR-derived stop price when set at entry, or the
+// configured fixed-percentage level otherwise.
 func (b *BaseTrader) slLevel(t *Trade) decimal.Decimal {
 	one := decimal.NewFromInt(1)
 	if !t.DynamicSLPrice.IsZero() {
@@ -143,9 +131,8 @@ func (b *BaseTrader) slLevel(t *Trade) decimal.Decimal {
 	return t.EntryPrice.Mul(one.Add(b.SL))
 }
 
-// evaluateExits checks TP, stop-loss (trailing or ATR/fixed), and the
-// 10-minute time exit. Returns isWin, isLoss, and the reason string.
-// Returns ("", false, false) when the trade should remain open.
+// evaluateExits checks TP, stop-loss (trailing or ATR/fixed), and a 10-minute
+// time exit. Returns ("", false, false) when the position should stay open.
 // Must be called with b.Lock held.
 func (b *BaseTrader) evaluateExits(t *Trade, price decimal.Decimal, now time.Time) (isWin, isLoss bool, reason string) {
 	one := decimal.NewFromInt(1)
@@ -204,9 +191,8 @@ func (b *BaseTrader) evaluateExits(t *Trade, price decimal.Decimal, now time.Tim
 	return false, false, ""
 }
 
-// recordClose finalises a position: updates PnL, balance, daily PnL, fires
-// notifications, triggers the circuit breaker if the daily limit is breached,
-// and appends the trade to Completed. Must be called with b.Lock held.
+// recordClose finalises a position and triggers the circuit breaker when the
+// daily loss limit is breached. Must be called with b.Lock held.
 func (b *BaseTrader) recordClose(t *Trade, price decimal.Decimal, isWin bool) {
 	if isWin {
 		t.Status = "WIN"
@@ -382,11 +368,10 @@ func deepCopyActiveTrades(src map[string][]*Trade) map[string][]*Trade {
 // At 0.2, a $5,000 account can hold at most $1,000 notional per trade.
 const maxPositionFraction = 0.20
 
-// computeEntrySize returns the order quantity and absolute SL price for a new
-// trade, using ATR-based sizing when available and fixed-percentage as fallback.
-// The quantity is capped so notional never exceeds maxPositionFraction × balance,
-// preventing oversized positions from 1-minute ATR values.
-// Must be called with the trader lock held (reads b.Balance, b.RiskPerTrade, b.SL).
+// computeEntrySize returns order quantity and ATR-derived SL price. Falls back
+// to fixed-percentage sizing when ATR is zero. Notional is capped at
+// maxPositionFraction × balance to guard against oversized 1-minute ATR positions.
+// Must be called with the trader lock held.
 func (b *BaseTrader) computeEntrySize(sig models.Signal) (qty, dynamicSLPrice decimal.Decimal) {
 	riskAmount := b.Balance.Mul(b.RiskPerTrade)
 	if !sig.ATR.IsZero() {
