@@ -121,8 +121,14 @@ func parseOrderResult(body []byte) (OrderResult, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return OrderResult{}, fmt.Errorf("parse order result: %w", err)
 	}
-	execQty, _ := decimal.NewFromString(raw.ExecutedQty)
-	avgPrice, _ := decimal.NewFromString(raw.AvgPrice)
+	execQty, err := decimal.NewFromString(raw.ExecutedQty)
+	if err != nil {
+		return OrderResult{}, fmt.Errorf("parse ExecutedQty: %w", err)
+	}
+	avgPrice, err := decimal.NewFromString(raw.AvgPrice)
+	if err != nil {
+		return OrderResult{}, fmt.Errorf("parse AvgPrice: %w", err)
+	}
 	return OrderResult{
 		OrderID:     raw.OrderID,
 		Symbol:      raw.Symbol,

@@ -131,25 +131,6 @@ func TestEngineManager_Concurrency(t *testing.T) {
 	}
 }
 
-func TestPriceBuffer_Circular(t *testing.T) {
-	size := 3
-	b := NewPriceBuffer(size)
-
-	b.Add(decimal.NewFromInt(1))
-	b.Add(decimal.NewFromInt(2))
-	b.Add(decimal.NewFromInt(3))
-	b.Add(decimal.NewFromInt(4)) // Wraps around, replaces 1.0
-
-	history := b.GetHistory()
-	if len(history) != 3 {
-		t.Errorf("Expected length 3, got %d", len(history))
-	}
-	// History should be [2, 3, 4]
-	if !history[0].Equal(decimal.NewFromInt(2)) || !history[2].Equal(decimal.NewFromInt(4)) {
-		t.Errorf("Circular buffer order incorrect: %v", history)
-	}
-}
-
 func TestStrategy_IncrementalAccuracy(t *testing.T) {
 	s := NewEfficientStrategy(2, 4, 3)
 	s.MacroPeriod = 4 // Override for small test

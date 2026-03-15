@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/papadacodr/kryptic-gopha/internal/models"
+	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
 )
 
@@ -349,6 +350,13 @@ func (s *EfficientMultiFactorStrategy) initADX(symbol string, candles []models.C
 	s.smMinusDM[symbol] = smMinusDM
 	s.adxValue[symbol] = adxValue
 	s.adxReady[symbol] = adxSeeded
+	if !adxSeeded {
+		log.Warn().
+			Str("symbol", symbol).
+			Int("candles", len(candles)).
+			Int("required", 2*s.ADXPeriod).
+			Msg("ADX gate inactive: insufficient warmup history, ADX filter bypassed until more bars accumulate")
+	}
 
 	// prevHigh/Low/Close must always be set so updateADX has valid prior values.
 	last := candles[len(candles)-1]

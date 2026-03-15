@@ -347,7 +347,7 @@ func (b *BaseTrader) saveState(v interface{}, filename string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0600)
 }
 
 // loadState reads filename from disk and unmarshals it into v under b's lock.
