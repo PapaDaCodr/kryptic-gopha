@@ -175,19 +175,20 @@ func TestPaperTrader_TimeExit(t *testing.T) {
 		Timestamp: start,
 	})
 
-	// Update at 1m, 5m, 10m
+	// Update at 1m, 5m, 10m - should all stay open
 	trader.UpdateMetrics(symbol, decimal.NewFromInt(101), start.Add(time.Minute))
 	trader.UpdateMetrics(symbol, decimal.NewFromInt(102), start.Add(5 * time.Minute))
-	
+	trader.UpdateMetrics(symbol, decimal.NewFromInt(102), start.Add(10 * time.Minute))
+
 	if len(trader.ActiveTrades[symbol]) != 1 {
 		t.Errorf("Trade exited too early")
 	}
 
-	// Final update at 11m -> should trigger 10m time exit
-	trader.UpdateMetrics(symbol, decimal.NewFromInt(103), start.Add(11 * time.Minute))
-	
+	// Final update at 31m -> should trigger 30m time exit
+	trader.UpdateMetrics(symbol, decimal.NewFromInt(103), start.Add(31 * time.Minute))
+
 	if len(trader.ActiveTrades[symbol]) != 0 {
-		t.Errorf("Trade should have exited after 10m")
+		t.Errorf("Trade should have exited after 30m")
 	}
 	if trader.TotalWins != 1 {
 		t.Errorf("Expected 1 win (price 103 > 100), got %d", trader.TotalWins)

@@ -39,7 +39,17 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		return
 	}
 
+	if p.DailyTradeCount >= p.MaxDailyTrades {
+		log.Warn().Int("daily_trades", p.DailyTradeCount).Int("limit", p.MaxDailyTrades).Msg("Paper trade ignored: max daily trades reached")
+		return
+	}
+
 	qty, dynamicSLPrice := p.computeEntrySize(sig)
+
+	if qty.IsZero() {
+		log.Warn().Str("symbol", sig.Symbol).Msg("Paper trade ignored: computed quantity is zero")
+		return
+	}
 
 	trade := &Trade{
 		Symbol:         sig.Symbol,
@@ -53,6 +63,7 @@ func (p *PaperTrader) OnSignal(sig models.Signal) {
 		DynamicSLPrice: dynamicSLPrice,
 	}
 	p.ActiveTrades[sig.Symbol] = append(p.ActiveTrades[sig.Symbol], trade)
+	p.DailyTradeCount++
 
 	log.Info().
 		Str("symbol", sig.Symbol).

@@ -94,6 +94,7 @@ func main() {
 		lt.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.01")
 		lt.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.05")
 		lt.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 3)
+		lt.MaxDailyTrades = getEnvInt("MAX_DAILY_TRADES", 15)
 		lt.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.003")
 		if err := lt.SyncBalance(); err != nil {
 			log.Warn().Err(err).Msg("Could not sync live balance; using fallback")
@@ -116,6 +117,7 @@ func main() {
 		pt.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.02")
 		pt.DailyLossLimit = getEnvDecimal("DAILY_LOSS_LIMIT", "0.06")
 		pt.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
+		pt.MaxDailyTrades = getEnvInt("MAX_DAILY_TRADES", 15)
 		pt.TrailingSL = os.Getenv("TRAILING_SL") != "false"
 		pt.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.015")
 		trader = pt
@@ -202,13 +204,24 @@ func main() {
 				t.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.015")
 				t.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.02")
 				t.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 5)
+				t.MaxDailyTrades = getEnvInt("MAX_DAILY_TRADES", 15)
 			case *engine.LiveTrader:
 				t.TP = getEnvDecimal("TP", "0.005")
 				t.SL = getEnvDecimal("SL", "0.003")
+				t.TrailingSL = os.Getenv("TRAILING_SL") != "false"
 				t.TrailingSLPct = getEnvDecimal("TRAILING_SL_PCT", "0.003")
 				t.RiskPerTrade = getEnvDecimal("RISK_PER_TRADE", "0.01")
 				t.MaxOpenTrades = getEnvInt("MAX_OPEN_TRADES", 3)
+				t.MaxDailyTrades = getEnvInt("MAX_DAILY_TRADES", 15)
 			}
+		}
+	}
+
+	// ── Position Reconciliation (Live mode only) ──────────────────────────────
+
+	if lt, ok := trader.(*engine.LiveTrader); ok {
+		if err := lt.ReconcilePositions(); err != nil {
+			log.Warn().Err(err).Msg("Position reconciliation failed; continuing anyway")
 		}
 	}
 
@@ -345,6 +358,77 @@ func main() {
 		}
 	})
 
+	mux.HandleFunc("/api/metrics", func(w http.ResponseWriter, r *http.Request) {
+		state := trader.GetState()
+		stats := trader.GetStats()
+
+		// Calculate metrics
+		var totalPnL decimal.Decimal
+		if !state.InitialBalance.IsZero() {
+			totalPnL = state.Balance.Sub(state.InitialBalance)
+		}
+
+		var roi float64
+		if !state.InitialBalance.IsZero() {
+			roi = totalPnL.Div(state.InitialBalance).InexactFloat64() * 100
+		}
+
+		// Calculate max drawdown from completed trades
+		maxDD := calculateMaxDrawdown(state.Completed, state.InitialBalance)
+
+		// Avg win/loss size
+		var avgWinSize, avgLossSize decimal.Decimal
+		if stats.TotalWins > 0 {
+			var totalWinPnL decimal.Decimal
+			for _, t := range state.Completed {
+				if t.PnL.GreaterThan(decimal.Zero) {
+					totalWinPnL = totalWinPnL.Add(t.PnL)
+				}
+			}
+			avgWinSize = totalWinPnL.Div(decimal.NewFromInt(int64(stats.TotalWins)))
+		}
+		if stats.TotalLosses > 0 {
+			var totalLossPnL decimal.Decimal
+			for _, t := range state.Completed {
+				if t.PnL.LessThan(decimal.Zero) {
+					totalLossPnL = totalLossPnL.Add(t.PnL)
+				}
+			}
+			avgLossSize = totalLossPnL.Div(decimal.NewFromInt(int64(stats.TotalLosses)))
+		}
+
+		// Profit factor
+		var profitFactor float64
+		if !avgLossSize.IsZero() && avgLossSize.LessThan(decimal.Zero) {
+			profitFactor = avgWinSize.Mul(decimal.NewFromInt(int64(stats.TotalWins))).
+				Div(avgLossSize.Mul(decimal.NewFromInt(int64(stats.TotalLosses))).Abs()).InexactFloat64()
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		tradingState := getTradingState(trader)
+		metrics := map[string]any{
+			"balance":            state.Balance.StringFixed(2),
+			"initial_balance":    state.InitialBalance.StringFixed(2),
+			"total_pnl":          totalPnL.StringFixed(2),
+			"roi_percent":        fmt.Sprintf("%.2f%%", roi),
+			"daily_pnl":          state.DailyPnL.StringFixed(2),
+			"total_trades":       stats.TotalSignals,
+			"wins":               stats.TotalWins,
+			"losses":             stats.TotalLosses,
+			"win_rate":           fmt.Sprintf("%.2f%%", stats.WinRate),
+			"active_trades":      stats.ActiveTrades,
+			"avg_win_size":       avgWinSize.StringFixed(2),
+			"avg_loss_size":      avgLossSize.StringFixed(2),
+			"profit_factor":      fmt.Sprintf("%.2f", profitFactor),
+			"max_drawdown":       fmt.Sprintf("%.2f%%", maxDD*100),
+			"trading_enabled":    tradingState["trading_enabled"],
+			"daily_trade_count":  tradingState["daily_trade_count"],
+		}
+		if err := json.NewEncoder(w).Encode(metrics); err != nil {
+			log.Error().Err(err).Msg("/api/metrics encode error")
+		}
+	})
+
 	mux.Handle("/", http.FileServer(http.Dir("./web")))
 
 	srv := &http.Server{
@@ -368,6 +452,13 @@ func main() {
 
 	<-ctx.Done()
 	log.Info().Msg("Shutdown signal received")
+
+	// Close all open positions (live mode only) before state save
+	if lt, ok := trader.(*engine.LiveTrader); ok {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		lt.CloseAllPositions(shutdownCtx)
+		cancel()
+	}
 
 	if err := trader.SaveState(stateFile); err != nil {
 		log.Error().Err(err).Msg("Final state save failed")
@@ -433,4 +524,50 @@ func getEnvFloat(key string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+func calculateMaxDrawdown(trades []engine.Trade, initialBalance decimal.Decimal) float64 {
+	if len(trades) == 0 {
+		return 0.0
+	}
+
+	peak := initialBalance
+	maxDD := decimal.Zero
+
+	balance := initialBalance
+	for _, t := range trades {
+		balance = balance.Add(t.PnL)
+		if balance.GreaterThan(peak) {
+			peak = balance
+		}
+		drawdown := peak.Sub(balance)
+		if drawdown.GreaterThan(maxDD) {
+			maxDD = drawdown
+		}
+	}
+
+	if peak.IsZero() {
+		return 0.0
+	}
+
+	return maxDD.Div(peak).InexactFloat64()
+}
+
+func getTradingState(trader engine.Trader) map[string]interface{} {
+	st := trader.GetState()
+	dailyTrades := 0
+	if lt, ok := trader.(*engine.LiveTrader); ok {
+		lt.Lock()
+		dailyTrades = lt.DailyTradeCount
+		lt.Unlock()
+	} else if pt, ok := trader.(*engine.PaperTrader); ok {
+		pt.Lock()
+		dailyTrades = pt.DailyTradeCount
+		pt.Unlock()
+	}
+
+	return map[string]interface{}{
+		"daily_trade_count": dailyTrades,
+		"trading_enabled":   st.TradingEnabled,
+	}
 }

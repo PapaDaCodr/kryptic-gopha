@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -69,6 +70,11 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 		return
 	}
 
+	if lt.DailyTradeCount >= lt.MaxDailyTrades {
+		log.Warn().Int("daily_trades", lt.DailyTradeCount).Int("limit", lt.MaxDailyTrades).Msg("Live trade ignored: max daily trades reached")
+		return
+	}
+
 	entrySide := exchange.SideBuy
 	if sig.Direction == "SELL" {
 		entrySide = exchange.SideSell
@@ -81,6 +87,11 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 	}
 
 	rawQty, dynamicSLPrice := lt.computeEntrySize(sig)
+
+	if rawQty.IsZero() {
+		log.Warn().Str("symbol", sig.Symbol).Msg("Live trade ignored: computed quantity is zero")
+		return
+	}
 
 	qty := exchange.RoundToStepSize(rawQty, info.StepSize)
 	if qty.LessThan(info.MinQty) {
@@ -123,6 +134,7 @@ func (lt *LiveTrader) OnSignal(sig models.Signal) {
 		DynamicSLPrice: dynamicSLPrice,
 	}
 	lt.ActiveTrades[sig.Symbol] = append(lt.ActiveTrades[sig.Symbol], trade)
+	lt.DailyTradeCount++
 
 	log.Info().
 		Str("symbol", sig.Symbol).
@@ -220,4 +232,134 @@ func (lt *LiveTrader) SaveState(filename string) error {
 
 func (lt *LiveTrader) LoadState(filename string) error {
 	return lt.BaseTrader.loadState(lt, filename)
+}
+
+// CloseAllPositions closes all active open positions via market orders.
+// Intended to be called during graceful shutdown (SIGTERM) to prevent orphaned positions.
+// Must be called with OUTSIDE the lock (method acquires it internally).
+func (lt *LiveTrader) CloseAllPositions(ctx context.Context) {
+	lt.Lock()
+	defer lt.Unlock()
+
+	totalClosed := 0
+	for symbol, trades := range lt.ActiveTrades {
+		for _, trade := range trades {
+			if trade.Status != "ACTIVE" {
+				continue
+			}
+
+			closeSide := exchange.SideSell
+			if trade.Direction == "SELL" {
+				closeSide = exchange.SideBuy
+			}
+
+			if _, err := lt.client.PlaceMarketOrder(symbol, closeSide, trade.Quantity); err != nil {
+				log.Error().Err(err).Str("symbol", symbol).Str("direction", trade.Direction).
+					Msg("CRITICAL: Failed to close position during shutdown")
+				if lt.Notifier != nil {
+					lt.Notifier.Notify(fmt.Sprintf(
+						"🚨 *SHUTDOWN CLOSE FAILED*\nCould not close `%s` [%s].\nManual intervention required.",
+						symbol, trade.Direction))
+				}
+			} else {
+				totalClosed++
+				log.Info().Str("symbol", symbol).Str("direction", trade.Direction).
+					Msg("Position closed during graceful shutdown")
+			}
+		}
+	}
+
+	if totalClosed > 0 {
+		log.Info().Int("count", totalClosed).Msg("Graceful shutdown: all positions closed")
+		if lt.Notifier != nil {
+			lt.Notifier.Notify(fmt.Sprintf("🛑 *BOT SHUTTING DOWN*\nClosed %d active position(s).", totalClosed))
+		}
+	}
+}
+
+// ReconcilePositions compares local state with actual Binance positions and reconciles
+// discrepancies. Must be called after LoadState to catch orphaned or closed positions.
+// Should be called BEFORE the engine starts accepting signals.
+func (lt *LiveTrader) ReconcilePositions() error {
+	lt.Lock()
+	defer lt.Unlock()
+
+	binancePositions, err := lt.client.GetOpenPositions()
+	if err != nil {
+		return fmt.Errorf("reconcile positions: fetch failed: %w", err)
+	}
+
+	// Build a map of Binance positions by symbol for quick lookup
+	binanceBySymbol := make(map[string]*exchange.OpenPosition)
+	for i := range binancePositions {
+		binanceBySymbol[binancePositions[i].Symbol] = &binancePositions[i]
+	}
+
+	// Track reconciliation summary for logging
+	orphaned := 0
+	closed := 0
+
+	// Phase 1: Check for Binance positions NOT in ActiveTrades (orphaned positions)
+	for symbol, bp := range binanceBySymbol {
+		if _, exists := lt.ActiveTrades[symbol]; !exists {
+			orphaned++
+			msg := fmt.Sprintf(
+				"⚠️ *ORPHANED POSITION*\nSymbol: `%s`\nSide: %s\nQty: %s\nEntry: %s",
+				symbol, bp.Side, bp.Quantity.StringFixed(4), bp.EntryPrice.StringFixed(2))
+			log.Warn().Str("symbol", symbol).Str("side", bp.Side).
+				Str("qty", bp.Quantity.String()).Msg("Orphaned position found on Binance")
+			if lt.Notifier != nil {
+				lt.Notifier.Notify(msg)
+			}
+			// Add to tracking: create a Trade record for this orphaned position
+			side := "BUY"
+			if bp.Side == "SHORT" {
+				side = "SELL"
+			}
+			orphanedTrade := &Trade{
+				Symbol:        symbol,
+				EntryPrice:    bp.EntryPrice,
+				Quantity:      bp.Quantity,
+				Direction:     side,
+				Time:          time.Now(),
+				Exits:         make(map[int]decimal.Decimal),
+				Status:        "ACTIVE",
+				HighWaterMark: bp.EntryPrice,
+			}
+			lt.ActiveTrades[symbol] = append(lt.ActiveTrades[symbol], orphanedTrade)
+		}
+	}
+
+	// Phase 2: Check for ActiveTrades NOT on Binance (already closed)
+	for symbol, trades := range lt.ActiveTrades {
+		if _, existsOnBinance := binanceBySymbol[symbol]; !existsOnBinance {
+			// Position was closed on Binance but we still track it locally
+			// Mark all trades for this symbol as closed via TIME_EXIT
+			remaining := make([]*Trade, 0)
+			for _, trade := range trades {
+				if trade.Status == "ACTIVE" {
+					closed++
+					// Use last known HWM as exit price approximation
+					exitPrice := trade.HighWaterMark
+					if exitPrice.IsZero() {
+						exitPrice = trade.EntryPrice
+					}
+					lt.recordClose(trade, exitPrice, false) // Mark as loss (conservative)
+					log.Warn().Str("symbol", symbol).Str("direction", trade.Direction).
+						Msg("Active trade was already closed on Binance; marked as TIME_EXIT loss")
+				} else {
+					remaining = append(remaining, trade)
+				}
+			}
+			if len(remaining) == 0 {
+				delete(lt.ActiveTrades, symbol)
+			} else {
+				lt.ActiveTrades[symbol] = remaining
+			}
+		}
+	}
+
+	log.Info().Int("orphaned", orphaned).Int("closed", closed).
+		Msg("Position reconciliation complete")
+	return nil
 }

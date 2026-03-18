@@ -14,9 +14,12 @@ import (
 )
 
 // atrSLMultiplier controls how many ATR units the stop-loss is placed away from
-// entry. 1.5× is a common convention that balances noise tolerance against
-// capital efficiency.
-const atrSLMultiplier = 1.5
+// entry. 2.0× balances noise tolerance against capital efficiency.
+const atrSLMultiplier = 2.0
+
+// minSLPercentage is the minimum stop-loss distance as a fraction of price.
+// Ensures that on 1m bars with tiny ATR, the SL still provides meaningful breathing room.
+const minSLPercentage = 0.005 // 0.5% of entry price
 
 // Trade is a single position record shared by PaperTrader and LiveTrader.
 // DynamicSLPrice is the ATR-derived stop computed as entry ± (atrSLMultiplier × ATR)
@@ -54,13 +57,15 @@ type BaseTrader struct {
 	TrailingSLPct  decimal.Decimal `json:"trailing_sl_pct"`
 	Balance        decimal.Decimal `json:"balance"`
 	InitialBalance decimal.Decimal `json:"initial_balance"`
-	RiskPerTrade   decimal.Decimal `json:"risk_per_trade"`
-	MaxOpenTrades  int             `json:"max_open_trades"`
-	DailyLossLimit decimal.Decimal `json:"daily_loss_limit"`
+	RiskPerTrade    decimal.Decimal `json:"risk_per_trade"`
+	MaxOpenTrades   int             `json:"max_open_trades"`
+	MaxDailyTrades  int             `json:"max_daily_trades"`
+	DailyLossLimit  decimal.Decimal `json:"daily_loss_limit"`
 
-	TradingEnabled bool            `json:"trading_enabled"`
-	LastDailyReset time.Time       `json:"last_daily_reset"`
-	DailyPnL       decimal.Decimal `json:"daily_pnl"`
+	TradingEnabled  bool            `json:"trading_enabled"`
+	LastDailyReset  time.Time       `json:"last_daily_reset"`
+	DailyPnL        decimal.Decimal `json:"daily_pnl"`
+	DailyTradeCount int             `json:"daily_trade_count"`
 
 	Notifier notifier.Notifier `json:"-"`
 	mode     string            // "paper" or "live" — controls notification labels
@@ -69,21 +74,23 @@ type BaseTrader struct {
 func newBaseTrader(balance float64, mode string) BaseTrader {
 	bal := decimal.NewFromFloat(balance)
 	return BaseTrader{
-		ActiveTrades:   make(map[string][]*Trade),
-		Completed:      make([]Trade, 0),
-		TP:             decimal.NewFromFloat(0.005),
-		SL:             decimal.NewFromFloat(0.003),
-		TrailingSL:     true,
-		TrailingSLPct:  decimal.NewFromFloat(0.003),
-		Balance:        bal,
-		InitialBalance: bal,
-		RiskPerTrade:   decimal.NewFromFloat(0.01),
-		MaxOpenTrades:  5,
-		DailyLossLimit: decimal.NewFromFloat(0.05),
-		TradingEnabled: true,
-		LastDailyReset: time.Now(),
-		DailyPnL:       decimal.Zero,
-		mode:           mode,
+		ActiveTrades:    make(map[string][]*Trade),
+		Completed:       make([]Trade, 0),
+		TP:              decimal.NewFromFloat(0.005),
+		SL:              decimal.NewFromFloat(0.003),
+		TrailingSL:      true,
+		TrailingSLPct:   decimal.NewFromFloat(0.003),
+		Balance:         bal,
+		InitialBalance:  bal,
+		RiskPerTrade:    decimal.NewFromFloat(0.01),
+		MaxOpenTrades:   5,
+		MaxDailyTrades:  15,
+		DailyLossLimit:  decimal.NewFromFloat(0.05),
+		TradingEnabled:  true,
+		LastDailyReset:  time.Now(),
+		DailyPnL:        decimal.Zero,
+		DailyTradeCount: 0,
+		mode:            mode,
 	}
 }
 
@@ -96,13 +103,14 @@ func (b *BaseTrader) activeCount() int {
 	return n
 }
 
-// checkDailyReset resets daily PnL and re-enables trading at calendar day
+// checkDailyReset resets daily PnL, trade count, and re-enables trading at calendar day
 // boundaries. Must be called with b.Lock held.
 func (b *BaseTrader) checkDailyReset() {
 	now := time.Now()
 	if now.YearDay() != b.LastDailyReset.YearDay() || now.Year() != b.LastDailyReset.Year() {
-		log.Info().Str("prev_daily_pnl", b.DailyPnL.StringFixed(2)).Msg("Daily risk reset")
+		log.Info().Str("prev_daily_pnl", b.DailyPnL.StringFixed(2)).Int("trades", b.DailyTradeCount).Msg("Daily risk reset")
 		b.DailyPnL = decimal.Zero
+		b.DailyTradeCount = 0
 		b.TradingEnabled = true
 		b.InitialBalance = b.Balance
 		b.LastDailyReset = now
@@ -131,7 +139,7 @@ func (b *BaseTrader) slLevel(t *Trade) decimal.Decimal {
 	return t.EntryPrice.Mul(one.Add(b.SL))
 }
 
-// evaluateExits checks TP, stop-loss (trailing or ATR/fixed), and a 10-minute
+// evaluateExits checks TP, stop-loss (trailing or ATR/fixed), and a 30-minute
 // time exit. Returns ("", false, false) when the position should stay open.
 // Must be called with b.Lock held.
 func (b *BaseTrader) evaluateExits(t *Trade, price decimal.Decimal, now time.Time) (isWin, isLoss bool, reason string) {
@@ -181,8 +189,8 @@ func (b *BaseTrader) evaluateExits(t *Trade, price decimal.Decimal, now time.Tim
 		}
 	}
 
-	// ── Time exit (10-minute maximum hold) ───────────────────────────────────
-	if now.Sub(t.Time) >= 10*time.Minute {
+	// ── Time exit (30-minute maximum hold) ───────────────────────────────────
+	if now.Sub(t.Time) >= 30*time.Minute {
 		w := (t.Direction == "BUY" && price.GreaterThan(t.EntryPrice)) ||
 			(t.Direction == "SELL" && price.LessThan(t.EntryPrice))
 		return w, !w, "TIME_EXIT"
@@ -371,11 +379,24 @@ const maxPositionFraction = 0.20
 // computeEntrySize returns order quantity and ATR-derived SL price. Falls back
 // to fixed-percentage sizing when ATR is zero. Notional is capped at
 // maxPositionFraction × balance to guard against oversized 1-minute ATR positions.
+// Returns zero quantity if balance is below $10 minimum.
 // Must be called with the trader lock held.
 func (b *BaseTrader) computeEntrySize(sig models.Signal) (qty, dynamicSLPrice decimal.Decimal) {
+	// Enforce minimum $10 account balance
+	minBalance := decimal.NewFromFloat(10.0)
+	if b.Balance.LessThan(minBalance) {
+		log.Warn().Str("balance", b.Balance.StringFixed(2)).Msg("Account balance below $10 minimum; cannot trade")
+		return decimal.Zero, decimal.Zero
+	}
+
 	riskAmount := b.Balance.Mul(b.RiskPerTrade)
 	if !sig.ATR.IsZero() {
 		slDistance := sig.ATR.Mul(decimal.NewFromFloat(atrSLMultiplier))
+		// Enforce minimum SL floor: at least minSLPercentage of price
+		minSLDistance := sig.Price.Mul(decimal.NewFromFloat(minSLPercentage))
+		if slDistance.LessThan(minSLDistance) {
+			slDistance = minSLDistance
+		}
 		qty = riskAmount.Div(slDistance)
 		if sig.Direction == "BUY" {
 			dynamicSLPrice = sig.Price.Sub(slDistance)
